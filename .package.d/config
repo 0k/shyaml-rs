@@ -1,0 +1,6 @@
+NAME="shyaml-rs"
+DESCRIPTION="Command-line YAML processor"
+EMAIL="valentin.lab@kalysto.org"
+AUTHOR="Valentin LAB"
+AUTHOR_EMAIL="$AUTHOR <$EMAIL>"
+FILES="Cargo.toml"

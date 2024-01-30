@@ -1,0 +1,19 @@
+#!/bin/bash
+
+set -e
+
+cd "$(dirname "$0")/.."
+
+echo "=== Running cargo build ==="
+cargo build
+
+echo ""
+echo "=== Running cargo test ==="
+cargo test
+
+echo ""
+echo "=== Running docshtest on README.org ==="
+python3 /home/vaab/dev/python/docshtest/docshtest.py README.org -r "#\\bshyaml\\b#$PWD/target/debug/shyaml#"
+
+echo ""
+echo "=== All tests passed ==="

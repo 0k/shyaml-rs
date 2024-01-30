@@ -1,0 +1,1141 @@
+* SHYAML: YAML for the command line
+
+[[https://crates.io/crates/shyaml-rs][https://img.shields.io/crates/v/shyaml-rs.svg]]
+[[https://docs.rs/shyaml-rs][https://docs.rs/shyaml-rs/badge.svg]]
+[[https://github.com/0k/shyaml-rs/blob/main/LICENSE][https://img.shields.io/badge/license-MIT-blue.svg]]
+
+** Description
+
+~shyaml~ is a command-line tool for working with YAML files.
+It is designed to make YAML data accessible in shell scripts, with
+support for merging YAML documents.
+
+This is a Rust rewrite of the original [[https://github.com/0k/shyaml][shyaml Python project]]. The
+command-line interface remains fully compatible with the original,
+allowing it to be used as a drop-in replacement.
+
+Key features:
+
+- Full YAML specification support via the [[https://github.com/pantoniou/libfyaml][libfyaml]] C library
+  (the Python version uses [[https://github.com/yaml/libyaml][libyaml]], last released in 2020)
+- Same command-line interface as the original Python version
+- Fast, standalone binary with no runtime dependencies
+- Support for YAML document streams
+- Ordered mapping preservation
+- [[#apply-merging-yaml-documents][YAML editing]] via ~apply~ action for merging documents (new in Rust version)
+
+
+** Alternatives and Comparison
+
+Several tools exist for command-line YAML processing. ~shyaml~ is
+intentionally simple and focused - it does a few things well: *querying
+YAML data in shell scripts* and *merging YAML documents*. If you need
+more, excellent alternatives exist.
+
+*** yq (mikefarah)
+
+[[https://github.com/mikefarah/yq][yq]] by Mike Farah deserves a special mention as the de facto standard
+for command-line YAML processing. Written in Go, it's a fantastic,
+feature-rich tool:
+
+- jq-like syntax for powerful queries and transformations
+- Support for YAML, JSON, XML, CSV, TOML, and properties files
+- Read *and write* capabilities with in-place editing
+- 50M+ downloads and excellent documentation
+- Active development and great community support
+
+*If you need a full-featured YAML Swiss Army knife, yq is likely your
+best choice.* It's what we'd recommend for most users who don't have
+existing shyaml scripts or specific simplicity requirements.
+
+*** Comparison Table
+
+| Tool | Language | YAML Parser | Spec | Write | Query syntax | Complexity |
+|------+----------+-------------+------+-------+--------------+------------|
+| [[https://github.com/mikefarah/yq][yq (mikefarah)]] | Go | [[https://github.com/go-yaml/yaml][go-yaml]] | 1.2 | yes | jq-like | feature-rich |
+| [[https://github.com/kislyuk/yq][yq (kislyuk)]] | Python | [[https://pyyaml.org/][PyYAML]] ([[https://github.com/yaml/libyaml][libyaml]]) | 1.1 | yes | jq (external) | moderate |
+| [[https://github.com/TomWright/dasel][dasel]] | Go | custom | 1.2 | yes | custom | feature-rich |
+| [[https://github.com/0k/shyaml][shyaml (Python)]] | Python | [[https://pyyaml.org/][PyYAML]] ([[https://github.com/yaml/libyaml][libyaml]]) | 1.1 | no | dot-notation | *simple* |
+| *shyaml-rs* | Rust | [[https://github.com/pantoniou/libfyaml][libfyaml]] | 1.2 | merge | dot-notation | *simple* |
+
+*** About the Underlying Parsers
+
+The choice of YAML parser matters for correctness, performance, and
+long-term maintenance:
+
+- *[[https://github.com/yaml/libyaml][libyaml]]* (used by PyYAML, kislyuk/yq): The classic C library,
+  but only supports YAML 1.1. Last release was 0.2.5 in 2020 - now in
+  low-maintenance mode with limited activity.
+
+- *[[https://github.com/go-yaml/yaml][go-yaml]]* (used by mikefarah/yq): Pure Go implementation supporting
+  YAML 1.2. The original author marked it "unmaintained" in 2025, though
+  the YAML community has since taken over maintenance.
+
+- *[[https://github.com/pantoniou/libfyaml][libfyaml]]* (used by shyaml-rs): Modern C library with full YAML 1.2
+  support, actively maintained. Features zero-copy parsing, no
+  artificial limits (libyaml has a 1024-char key limit), streaming
+  support, and passes the complete YAML test suite.
+
+*** Why shyaml / shyaml-rs?
+
+~shyaml~ was designed with a different philosophy: *simplicity and
+shell-friendliness over features*. There's no query language to
+learn - just intuitive dot-notation paths like ~config.database.port~.
+
+The feature set is deliberately minimal:
+
+- Query access with simple dot-notation paths
+- YAML merging via ~apply~ (overlay documents onto a base)
+- No format conversion
+- No complex filtering or transformations
+- No jq compatibility
+
+*Choose shyaml-rs if you:*
+- Have existing scripts using the Python shyaml
+- Want the simplest possible interface - no learning curve
+- Just need to extract values from YAML files
+- Need to merge YAML configurations (overlays, environments)
+- Need streaming support for multi-document YAML
+- Prefer null-terminated output (~-0~ options) for safe shell parsing
+
+*Choose yq or dasel if you:*
+- Need in-place editing or arbitrary modifications
+- Want jq-compatible syntax for complex queries
+- Need to convert between formats (YAML/JSON/TOML/XML)
+- Require filters, transformations, or computed values
+
+*** Implementation and Performance
+
+~shyaml-rs~ is built for performance:
+
+- *Rust + libfyaml*: Combines Rust's safety with [[https://github.com/pantoniou/libfyaml][libfyaml]], a
+  high-performance C library that fully implements the YAML 1.2
+  specification with zero-copy parsing
+- *Zero runtime dependencies*: Single static binary, no Python or
+  other interpreters needed
+- *No artificial limits*: Unlike libyaml's 1024-character key limit,
+  libfyaml handles arbitrarily large documents
+- *Streaming support*: Process multi-document YAML streams without
+  loading everything into memory
+
+Compared to the original Python shyaml (which uses PyYAML/libyaml),
+expect significantly faster startup and parsing times, especially
+noticeable when processing many files in a loop or large YAML
+documents.
+
+
+** Requirements
+
+~shyaml~ is a standalone binary that works on Linux and macOS.
+Pre-built binaries are available for common platforms.
+
+
+** Installation
+
+*** From crates.io
+
+If you have Rust installed:
+
+#+begin_example
+cargo install shyaml-rs
+#+end_example
+
+*** From source
+
+To build from source:
+
+#+begin_example
+git clone https://github.com/0k/shyaml-rs
+cd shyaml-rs
+cargo build --release
+#+end_example
+
+The binary will be available at ~target/release/shyaml-rs~.
+
+*** Pre-built binaries
+
+Pre-built binaries may be available from the [[https://github.com/0k/shyaml-rs/releases][releases page]].
+
+
+** Migrating from Python shyaml
+
+This Rust version is designed as a drop-in replacement for the Python
+~shyaml~. Your existing shell scripts should work without
+modification.
+
+Key differences:
+
+- Uses [[https://github.com/pantoniou/libfyaml][libfyaml]] for YAML parsing (the Python version used [[https://pyyaml.org/][PyYAML]]/[[https://github.com/yaml/libyaml][libyaml]])
+- No Python runtime required
+- Slightly different output formatting in some edge cases
+- No Python API (command-line only)
+
+If you were using the Python API, you'll need to use the command-line
+interface instead, or continue using the Python version.
+
+
+** Documentation
+
+The following documented examples are tested for conformance with the
+implementation.
+
+Since this version always uses ~libfyaml~, some examples that had
+different behavior between Python YAML implementations may behave
+differently. Examples marked with ~docshtest: ignore-if LIBFYAML~
+are skipped in testing as they had implementation-specific output in
+the Python version.
+
+You can check the version and library information with:
+
+#+begin_src docshtest
+$ shyaml -V | grep "^libfyaml used:"  ## docshtest: if-success-set LIBFYAML
+libfyaml used: True
+#+end_src
+
+
+** Usage
+
+~shyaml~ takes its YAML input file from standard input ONLY. So let's
+define here a common YAML input for the next examples:
+
+#+begin_src docshtest
+$ cat <<EOF > test.yaml
+name: "MyName !! héhé"  ## using encoding, and support comments !
+subvalue:
+    how-much: 1.1
+    how-many: 2
+    things:
+        - first
+        - second
+        - third
+    maintainer: "Valentin Lab"
+    description: |
+        Multiline description:
+        Line 1
+        Line 2
+subvalue.how-much: 1.2
+subvalue.how-much\more: 1.3
+subvalue.how-much\.more: 1.4
+EOF
+#+end_src
+
+
+*** General browsing struct and displaying simple values
+
+Simple query of simple attribute:
+
+#+begin_src docshtest
+$ cat test.yaml | shyaml get-value name
+MyName !! héhé
+#+end_src
+
+Query nested attributes by using '.' between key labels:
+
+#+begin_src docshtest
+$ cat test.yaml | shyaml get-value subvalue.how-much
+1.1
+#+end_src
+
+Get type of attributes:
+
+#+begin_src docshtest
+$ cat test.yaml | shyaml get-type name
+str
+$ cat test.yaml | shyaml get-type subvalue.how-much
+float
+#+end_src
+
+Get length of structures or sequences:
+
+#+begin_src docshtest
+$ cat test.yaml | shyaml get-length subvalue
+5
+$ cat test.yaml | shyaml get-length subvalue.things
+3
+#+end_src
+
+But this won't work on other types:
+
+#+begin_src docshtest
+$ cat test.yaml | shyaml get-length name
+Error: get-length does not support 'str' type. Please provide or select a sequence or struct.
+#+end_src
+
+
+*** Parse structure
+
+Get sub YAML from a structure attribute:
+
+#+begin_src docshtest
+$ cat test.yaml | shyaml get-type subvalue
+struct
+$ cat test.yaml | shyaml get-value subvalue  ## docshtest: ignore-if LIBYAML,LIBFYAML
+how-much: 1.1
+how-many: 2
+things:
+- first
+- second
+- third
+maintainer: Valentin Lab
+description: 'Multiline description:
+
+  Line 1
+
+  Line 2
+
+  '
+#+end_src
+
+Iteration through keys only:
+
+#+begin_src docshtest
+$ cat test.yaml | shyaml keys
+name
+subvalue
+subvalue.how-much
+subvalue.how-much\more
+subvalue.how-much\.more
+#+end_src
+
+Iteration through keys only (~\0~ terminated strings):
+
+#+begin_src docshtest
+$ cat test.yaml | shyaml keys-0 subvalue | xargs -0 -n 1 echo "VALUE:"
+VALUE: how-much
+VALUE: how-many
+VALUE: things
+VALUE: maintainer
+VALUE: description
+#+end_src
+
+Iteration through values only (~\0~ terminated string highly recommended):
+
+#+begin_src docshtest
+$ cat test.yaml | shyaml values-0 subvalue |
+  while IFS='' read -r -d $'\0' value; do
+      echo "RECEIVED: '$value'"
+  done ## docshtest: ignore-if LIBFYAML
+RECEIVED: '1.1'
+RECEIVED: '2'
+RECEIVED: '- first
+- second
+- third
+'
+RECEIVED: 'Valentin Lab'
+RECEIVED: 'Multiline description:
+Line 1
+Line 2
+'
+#+end_src
+
+Iteration through keys and values (~\0~ terminated string highly recommended):
+
+#+begin_src docshtest
+$ read-0() {
+    while [ "$1" ]; do
+        IFS=$'\0' read -r -d '' "$1" || return 1
+        shift
+    done
+  } &&
+  cat test.yaml | shyaml key-values-0 subvalue |
+  while read-0 key value; do
+      echo "KEY: '$key'"
+      echo "VALUE: '$value'"
+      echo
+  done  ## docshtest: ignore-if LIBFYAML
+KEY: 'how-much'
+VALUE: '1.1'
+
+KEY: 'how-many'
+VALUE: '2'
+
+KEY: 'things'
+VALUE: '- first
+- second
+- third
+'
+
+KEY: 'maintainer'
+VALUE: 'Valentin Lab'
+
+KEY: 'description'
+VALUE: 'Multiline description:
+Line 1
+Line 2
+'
+<BLANKLINE>
+#+end_src
+
+Notice, that you'll get the same result using
+~get-values~. ~get-values~ will support sequences and struct,
+and ~key-values~ support only struct. (for a complete table of
+which function support what you can look at the usage line)
+
+And, if you ask for keys, values, key-values on non struct like, you'll
+get an error:
+
+#+begin_src docshtest
+$ cat test.yaml | shyaml keys name
+Error: keys does not support 'str' type. Please provide or select a struct.
+$ cat test.yaml | shyaml values subvalue.how-many
+Error: values does not support 'int' type. Please provide or select a struct.
+$ cat test.yaml | shyaml key-values subvalue.how-much
+Error: key-values does not support 'float' type. Please provide or select a struct.
+#+end_src
+
+
+*** Parse sequence
+
+Query a sequence with ~get-value~:
+
+#+begin_src docshtest
+$ cat test.yaml | shyaml get-type subvalue.things
+sequence
+$ cat test.yaml | shyaml get-value subvalue.things
+- first
+- second
+- third
+#+end_src
+
+And access individual elements with python-like indexing:
+
+#+begin_src docshtest
+$ cat test.yaml | shyaml get-value subvalue.things.0
+first
+$ cat test.yaml | shyaml get-value subvalue.things.-1
+third
+$ cat test.yaml | shyaml get-value subvalue.things.5  ## docshtest: ignore-if LIBFYAML
+Error: invalid path 'subvalue.things.5', index 5 is out of range (3 elements in sequence).
+#+end_src
+
+Note that this will work only with integer (preceded or not by a minus
+sign):
+
+#+begin_src docshtest
+$ cat test.yaml | shyaml get-value subvalue.things.foo  ## docshtest: ignore-if LIBFYAML
+Error: invalid path 'subvalue.things.foo', non-integer index 'foo' provided on a sequence.
+#+end_src
+
+More usefull, parse a list in one go with ~get-values~:
+
+#+begin_src docshtest
+$ cat test.yaml | shyaml get-values subvalue.things
+first
+second
+third
+#+end_src
+
+Note that the action is called ~get-values~, and that output is
+separated by newline char(s) (which is os dependent), this can bring
+havoc if you are parsing values containing newlines itself. Hopefully,
+~shyaml~ has a ~get-values-0~ to terminate strings by ~\0~ char,
+which allows complete support of any type of values, including YAML.
+~get-values~ outputs key and values for ~struct~ types and only
+values for ~sequence~ types:
+
+#+begin_src docshtest
+$ cat test.yaml | shyaml get-values-0 subvalue |
+  while IFS='' read -r -d '' key &&
+        IFS='' read -r -d '' value; do
+      echo "'$key' -> '$value'"
+  done  ## docshtest: ignore-if LIBFYAML
+'how-much' -> '1.1'
+'how-many' -> '2'
+'things' -> '- first
+- second
+- third
+'
+'maintainer' -> 'Valentin Lab'
+'description' -> 'Multiline description:
+Line 1
+Line 2
+'
+#+end_src
+
+Please note that, if ~get-values{,-0}~ actually works on ~struct~,
+it's maybe more explicit to use the equivalent ~key-values{,0}~. It
+should be noted that ~key-values{,0}~ is not completly equivalent as
+it is meant to be used with ~struct~ only and will complain if not.
+
+You should also notice that values that are displayed are YAML compatible. So
+if they are complex, you can re-use ~shyaml~ on them to parse their content.
+
+Of course, ~get-values~ should only be called on sequence elements:
+
+#+begin_src docshtest
+$ cat test.yaml | shyaml get-values name
+Error: get-values does not support 'str' type. Please provide or select a sequence or struct.
+#+end_src
+
+
+*** Parse YAML document streams
+
+YAML input can be a stream of documents, the action will then be
+applied to each document:
+
+#+begin_src docshtest
+$ i=0; while true; do
+      ((i++))
+      echo "ingests:"
+      echo " - data: xxx"
+      echo "   id: tag-$i"
+      if ((i >= 3)); then
+          break
+      fi
+      echo "---"
+done | shyaml get-value ingests.0.id | tr '\0' '&'
+tag-1&tag-2&tag-3
+#+end_src
+
+
+Notice that ~NUL~ char is used by default for separating output
+iterations if not used in ~-y~ mode. You can use that to separate
+each output.  ~-y~ mode will use conventional YAML way to separate
+documents (which is ~---~).
+
+So:
+
+#+begin_src docshtest
+$ i=0; while true; do
+      ((i++))
+      echo "ingests:"
+      echo " - data: xxx"
+      echo "   id: tag-$i"
+      if ((i >= 3)); then
+          break
+      fi
+      echo "---"
+done | shyaml get-value -y ingests.0.id  ## docshtest: ignore-if LIBYAML,LIBFYAML
+tag-1
+...
+---
+tag-2
+...
+---
+tag-3
+...
+#+end_src
+
+Notice that it is not supported to use any query that can output more than one
+value (like all the query that can be suffixed with ~*-0~) with a multi-document
+YAML:
+
+#+begin_example
+# i=0; while true; do
+      ((i++))
+      echo "ingests:"
+      echo " - data: xxx"
+      echo "   id: tag-$i"
+      if ((i >= 3)); then
+          break
+      fi
+      echo "---"
+done | shyaml keys ingests.0 >/dev/null
+Error: Source YAML is multi-document, which doesn't support any other action than get-type, get-length, get-value
+#+end_example
+
+You'll probably notice also, that output seems buffered. The previous
+content is displayed as a whole only at the end. If you need a
+continuous flow of YAML document, then the command line option ~-L~
+is required to force a non-buffered line-by-line reading of the file
+so as to ensure that each document is properly parsed as soon as
+possible. That means as soon as either a YAML document end is detected
+(~---~ or ~EOF~):
+
+Without the ~-L~, if we kill our shyaml process before the end:
+
+#+begin_src docshtest
+$ i=0; while true; do
+      ((i++))
+      echo "ingests:"
+      echo " - data: xxx"
+      echo "   id: tag-$i"
+      if ((i >= 2)); then
+          break
+      fi
+      echo "---"
+      sleep 10
+done 2>/dev/null | shyaml get-value ingests.0.id & pid=$! ; sleep 2; kill $pid
+#+end_src
+
+
+With the ~-L~, if we kill our shyaml process before the end:
+
+#+begin_src docshtest
+$ i=0; while true; do
+      ((i++))
+      echo "ingests:"
+      echo " - data: xxx"
+      echo "   id: tag-$i"
+      if ((i >= 2)); then
+          break
+      fi
+      echo "---"
+      sleep 10
+done 2>/dev/null | shyaml get-value -L ingests.0.id & pid=$! ; sleep 2; kill $pid
+tag-1
+#+end_src
+
+
+Using ~-y~ is required to force a YAML output that will be also parseable as a stream,
+which could help you chain shyaml calls:
+
+#+begin_src docshtest
+$ i=0; while true; do
+      ((i++))
+      echo "ingests:"
+      echo " - data: xxx"
+      echo "   id: tag-$i"
+      if ((i >= 3)); then
+          break
+      fi
+      echo "---"
+      sleep 0.2
+done | shyaml get-value ingests.0 -L -y | shyaml get-value id | tr '\0' '\n'
+tag-1
+tag-2
+tag-3
+#+end_src
+
+
+An empty string will be still considered as an empty YAML document:
+
+#+begin_src docshtest
+$ echo | shyaml get-value "toto"  ## docshtest: ignore-if LIBFYAML
+Error: invalid path 'toto', can't query subvalue 'toto' of a leaf (leaf value is None).
+#+end_src
+
+An empty value in a mapping will be considered as "None":
+
+#+begin_src docshtest
+$ echo "a: " | shyaml get-value "a"  ## docshtest: ignore-if LIBFYAML
+None
+$ echo "a: " | shyaml get-value -y "a"  ## docshtest: ignore-if LIBFYAML
+null
+$ echo "a: " | shyaml get-type "a"  ## docshtest: ignore-if LIBFYAML
+NoneType
+$ echo "a: " | shyaml key-values-0 "a" | tr '\0' '>'  ## docshtest: ignore-if LIBFYAML
+a>None>
+$ echo "a: " | shyaml key-values-0 -y "a" | tr '\0' '>'  ## docshtest: ignore-if LIBFYAML
+a>null>
+#+end_src
+
+
+*** Keys containing '.'
+
+Use and ~\\~ to access keys with ~\~ and ~\.~ to access keys
+with literal ~.~ in them. Just be mindful of shell escaping (example
+uses single quotes):
+
+#+begin_src docshtest
+$ cat test.yaml | shyaml get-value 'subvalue\.how-much'
+1.2
+$ cat test.yaml | shyaml get-value 'subvalue\.how-much\\more'
+1.3
+$ cat test.yaml | shyaml get-value 'subvalue\.how-much\\.more' default
+default
+#+end_src
+
+This last one didn't escape correctly the last ~.~, this is the
+correct version:
+
+#+begin_src docshtest
+$ cat test.yaml | shyaml get-value 'subvalue\.how-much\\\.more' default
+1.4
+#+end_src
+
+
+*** empty string keys
+
+Yep, ~shyaml~ supports empty stringed keys. You might never have use
+for this one, but it's in YAML specification. So ~shyaml~ supports
+it:
+
+#+begin_src docshtest
+$ cat <<EOF > test.yaml
+empty-sub-key:
+    "":
+       a: foo
+       "": bar
+"": wiz
+EOF
+
+$ cat test.yaml | shyaml get-value empty-sub-key..
+bar
+$ cat test.yaml | shyaml get-value ''
+wiz
+#+end_src
+
+Please notice that one empty string is different than no string at all:
+
+#+begin_src docshtest
+$ cat <<EOF > test.yaml
+"":
+   a: foo
+   b: bar
+"x": wiz
+EOF
+$ cat test.yaml | shyaml keys
+
+x
+$ cat test.yaml | shyaml keys ''
+a
+b
+#+end_src
+
+The first asks for keys of the root YAML, the second asks for keys of the
+content of the empty string named element located in the root YAML.
+
+
+*** Handling missing paths
+
+There is a third argument on the command line of shyaml which is the
+DEFAULT argument. If the given KEY was not found in the YAML
+structure, then ~shyaml~ would return what you provided as DEFAULT.
+
+As of version < 0.3, this argument was defaulted to the empty
+string. For all version above 0.3 (included), if not provided, then
+an error message will be printed:
+
+#+begin_src docshtest
+$ echo "a: 3" | shyaml get-value a mydefault
+3
+
+$ echo "a: 3" | shyaml get-value b mydefault
+mydefault
+
+$ echo "a: 3" | shyaml get-value b  ## docshtest: ignore-if LIBFYAML
+Error: invalid path 'b', missing key 'b' in struct.
+#+end_src
+
+You can emulate pre v0.3 behavior by specifying explicitly an empty
+string as third argument:
+
+#+begin_src docshtest
+$ echo "a: 3" | shyaml get-value b ''
+#+end_src
+
+Starting with version 0.6, you can also use the ~-q~ or ~--quiet~ to fail
+silently in case of KEY not found in the YAML structure:
+
+#+begin_src docshtest
+$ echo "a: 3" | shyaml -q get-value b; echo "errlvl: $?"
+errlvl: 1
+$ echo "a: 3" | shyaml -q get-value a; echo "errlvl: $?"
+3errlvl: 0
+#+end_src
+
+
+*** Ordered mappings
+
+Currently, using ~shyaml~ in a shell script involves happily taking
+YAML inputs and outputting YAML outputs that will further be processed.
+
+And this works very well.
+
+Before version ~0.4.0~, ~shyaml~ would boldly re-order (sorting them
+alphabetically) the keys in mappings. If this should be considered
+harmless per specification (mappings are indeed supposed to be
+unordered, this means order does not matter), in practical, YAML users
+could feel wronged by ~shyaml~ when there YAML got mangled and they
+wanted to give a meaning to the basic YAML mapping.
+
+Who am I to forbid such usage of YAML mappings ? So starting from
+version ~0.4.0~, ~shyaml~ will happily keep the order of your
+mappings:
+
+#+begin_src docshtest
+$ cat <<EOF > test.yaml
+mapping:
+  a: 1
+  c: 2
+  b: 3
+EOF
+#+end_src
+
+For ~shyaml~ version before ~0.4.0~:
+
+#+begin_example
+# shyaml get-value mapping < test.yaml
+a: 1
+b: 3
+c: 2
+#+end_example
+
+For ~shyaml~ version including and after ~0.4.0~:
+
+#+begin_src docshtest
+$ shyaml get-value mapping < test.yaml
+a: 1
+c: 2
+b: 3
+#+end_src
+
+
+*** Strict YAML for further processing
+
+Processing yaml can be done recursively and extensively through using
+the output of ~shyaml~ into ~shyaml~. Most of its output is itself
+YAML. Most ? Well, for ease of use, literal keys (string, numbers) are
+outputed directly without YAML quotes, which is often convenient.
+
+But this has the consequence of introducing inconsistent behavior. So
+when processing YAML coming out of shyaml, you should probably think
+about using the ~--yaml~ (or ~-y~) option to output only strict YAML.
+
+With the drawback that when you'll want to output string, you'll need to
+call a last time ~shyaml get-value~ to explicitly unquote the YAML.
+
+
+*** Object Tag
+
+YAML spec allows object tags which allows you to map local data to
+objects in your application.
+
+When using ~shyaml~, we do not want to mess with these tags, but still
+allow parsing their internal structure.
+
+~get-type~ will correctly give you the type of the object:
+
+#+begin_src docshtest
+$ cat <<EOF > test.yaml
+%TAG !e! tag:example.com,2000:app/
+---
+- !e!foo "bar"
+EOF
+
+$ shyaml get-type 0 < test.yaml
+tag:example.com,2000:app/foo
+#+end_src
+
+~get-value~ with ~-y~ (see section Strict YAML) will give you the
+complete yaml tagged value:
+
+#+begin_src docshtest
+$ shyaml get-value -y 0 < test.yaml  ## docshtest: ignore-if LIBYAML,LIBFYAML
+!<tag:example.com,2000:app/foo> 'bar'
+#+end_src
+
+
+Another example:
+
+#+begin_src docshtest
+$ cat <<EOF > test.yaml
+%TAG ! tag:clarkevans.com,2002:
+--- !shape
+  # Use the ! handle for presenting
+  # tag:clarkevans.com,2002:circle
+- !circle
+  center: &ORIGIN {x: 73, y: 129}
+  radius: 7
+- !line
+  start: *ORIGIN
+  finish: { x: 89, y: 102 }
+- !label
+  start: *ORIGIN
+  color: 0xFFEEBB
+  text: Pretty vector drawing.
+EOF
+$ shyaml get-type 2 < test.yaml
+tag:clarkevans.com,2002:label
+#+end_src
+
+And you can still traverse internal value:
+
+#+begin_src docshtest
+$ shyaml get-value -y 2.start < test.yaml  ## docshtest: ignore-if LIBFYAML
+x: 73
+y: 129
+#+end_src
+
+
+Note that all global tags will be resolved and simplified (as
+~!!map~, ~!!str~, ~!!seq~), but not unknown local tags:
+
+#+begin_src docshtest
+$ cat <<EOF > test.yaml
+%YAML 1.1
+---
+!!map {
+  ? !!str "sequence"
+  : !!seq [ !!str "one", !!str "two" ],
+  ? !!str "mapping"
+  : !!map {
+    ? !!str "sky" : !myobj "blue",
+    ? !!str "sea" : !!str "green",
+  },
+}
+EOF
+
+$ shyaml get-value < test.yaml  ## docshtest: ignore-if LIBYAML,LIBFYAML
+sequence:
+- one
+- two
+mapping:
+  sky: !myobj 'blue'
+  sea: green
+#+end_src
+
+
+*** Empty documents
+
+When provided with an empty document, ~shyaml~ will consider the
+document to hold a ~null~ value:
+
+#+begin_src docshtest
+$ echo | shyaml get-value -y  ## docshtest: ignore-if LIBYAML,LIBFYAML
+null
+...
+#+end_src
+
+
+*** Version information
+
+You can get useful information about the version and underlying library
+with ~shyaml --version~ (or ~-V~):
+
+#+begin_example
+# shyaml -V      ## Example of possible output
+version: 0.1.0
+libfyaml used: True
+libfyaml available: 0.9.1-alpha
+Rust: rustc 1.75.0 (82e1608df 2023-12-21)
+#+end_example
+
+
+*** Apply: Merging YAML Documents
+
+The ~apply~ action merges overlay YAML files into a base document from stdin:
+
+#+begin_src docshtest
+$ cat <<EOF > base.yaml
+database:
+  host: localhost
+  port: 5432
+paths:
+  - /var/log
+  - /var/cache
+EOF
+
+$ cat <<EOF > overlay.yaml
+database:
+  port: 3306
+  user: admin
+paths:
+  - /var/data
+EOF
+
+$ cat base.yaml | shyaml apply overlay.yaml
+database:
+  host: localhost
+  port: 3306
+  user: admin
+paths:
+- /var/log
+- /var/cache
+- /var/data
+#+end_src
+
+Mappings are merged recursively. Sequences are appended with deduplication.
+
+**** Sequence Deduplication
+
+Sequences merge with deduplication. Duplicates are moved to their last
+occurrence position:
+
+#+begin_src docshtest
+$ cat <<EOF > base.yaml
+items:
+  - !foo a
+  - b
+  - c
+EOF
+
+$ cat <<EOF > overlay.yaml
+items:
+  - b
+  - !bar d
+EOF
+
+$ cat base.yaml | shyaml apply overlay.yaml
+items:
+- !foo a
+- c
+- b
+- !bar d
+#+end_src
+
+In this example, ~b~ was in both base and overlay, so it moves to the
+end (where overlay placed it), and ~d~ is appended.
+
+**** Null Removes Keys
+
+Setting a key to ~null~ in an overlay removes it from the result:
+
+#+begin_src docshtest
+$ cat <<EOF > base.yaml
+keep: !foo 1
+remove: 2
+EOF
+
+$ cat <<EOF > overlay.yaml
+remove: null
+EOF
+
+$ cat base.yaml | shyaml apply overlay.yaml
+keep: !foo 1
+#+end_src
+
+This works recursively in nested mappings as well.
+
+**** Tagged Values
+
+Tagged values are preserved when not overlayed, and replaced when overlayed:
+
+#+begin_src docshtest
+$ cat <<EOF > base.yaml
+keep: !foo 1
+change: !bar old
+EOF
+
+$ cat <<EOF > overlay.yaml
+change: new
+EOF
+
+$ cat base.yaml | shyaml apply overlay.yaml
+keep: !foo 1
+change: new
+#+end_src
+
+Tags are also considered in sequence deduplication, so ~!foo 1~ and ~1~
+are treated as different values:
+
+#+begin_src docshtest
+$ cat <<EOF > base.yaml
+items:
+  - !foo 1
+  - 1
+EOF
+
+$ cat <<EOF > overlay.yaml
+items:
+  - 1
+EOF
+
+$ cat base.yaml | shyaml apply overlay.yaml
+items:
+- !foo 1
+- 1
+#+end_src
+
+**** Merge Policies
+
+You can override the default merge behavior for specific paths using
+~-m~ or ~--merge-policy~. The format is ~PATH=POLICY~ where POLICY is
+one of:
+
+- ~merge~ - deep recursive merge (default): mappings are merged, sequences are appended
+- ~replace~ - overlay completely replaces base
+- ~prepend~ - overlay sequence is prepended to base sequence (falls back to ~replace~ for non-sequences)
+
+Multiple policies can be specified comma-separated or with multiple flags:
+
+#+begin_src docshtest
+$ cat <<EOF > base.yaml
+config:
+  host: localhost
+  port: 5432
+items:
+  - a
+  - b
+EOF
+
+$ cat <<EOF > overlay.yaml
+config:
+  port: 3306
+  user: admin
+items:
+  - c
+EOF
+
+$ cat base.yaml | shyaml apply -m "config=replace" overlay.yaml
+config:
+  port: 3306
+  user: admin
+items:
+- a
+- b
+- c
+
+$ cat base.yaml | shyaml apply -m "items=prepend" overlay.yaml
+config:
+  host: localhost
+  port: 3306
+  user: admin
+items:
+- c
+- a
+- b
+
+$ cat base.yaml | shyaml apply -m "config=replace,items=prepend" overlay.yaml
+config:
+  port: 3306
+  user: admin
+items:
+- c
+- a
+- b
+#+end_src
+
+Policies apply to the specified path only; descendants use default merge.
+
+
+** Contributing
+
+Any suggestions or issues are welcome. Push requests are very welcome,
+please check out the guidelines.
+
+
+*** Push Request Guidelines
+
+You can send any code. I'll look at it and will integrate it myself in
+the code base and leave you as the author. This process can take time and
+it'll take less time if you follow the following guidelines:
+
+- Run ~cargo fmt~ before committing
+- Run ~cargo clippy~ and address any warnings
+- Separate your commits per smallest concern
+- Each commit should pass the tests (to allow easy bisect)
+- Each functionality/bugfix commit should contain the code, tests,
+  and doc
+- Prior minor commit with typographic or code cosmetic changes are
+  very welcome. These should be tagged in their commit summary with
+  ~!minor~
+- The commit message should follow gitchangelog rules (check the git
+  log to get examples)
+- If the commit fixes an issue or finished the implementation of a
+  feature, please mention it in the summary
+
+If you have some questions about guidelines which is not answered here,
+please check the current ~git log~, you might find previous commit that
+shows you how to deal with your issue.
+
+
+** License
+
+Copyright (c) 2024-2026 Valentin Lab.
+
+Licensed under the [[https://github.com/0k/shyaml-rs/blob/main/LICENSE][MIT License]].
+
+
+** Legacy Python Version
+
+The original Python implementation of ~shyaml~ is available at
+[[https://github.com/0k/shyaml][github.com/0k/shyaml]] and can be installed via [[https://pypi.org/project/shyaml/][pip]]:
+
+#+begin_example
+pip install shyaml
+#+end_example
+
+The Python version includes a Python API for programmatic access to
+YAML data, which is not available in this Rust version.
