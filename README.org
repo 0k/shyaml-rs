@@ -8,7 +8,7 @@
 
 ~shyaml~ is a command-line tool for working with YAML files.
 It is designed to make YAML data accessible in shell scripts, with
-support for merging YAML documents.
+support for merging and modifying YAML documents.
 
 This is a Rust rewrite of the original [[https://github.com/0k/shyaml][shyaml Python project]]. The
 command-line interface remains fully compatible with the original,
@@ -22,15 +22,15 @@ Key features:
 - Fast, standalone binary with no runtime dependencies
 - Support for YAML document streams
 - Ordered mapping preservation
-- [[#apply-merging-yaml-documents][YAML editing]] via ~apply~ action for merging documents (new in Rust version)
+- [[#apply-merging-yaml-documents][YAML editing]] via ~apply~ and ~set-value~ actions (new in Rust version)
 
 
 ** Alternatives and Comparison
 
 Several tools exist for command-line YAML processing. ~shyaml~ is
 intentionally simple and focused - it does a few things well: *querying
-YAML data in shell scripts* and *merging YAML documents*. If you need
-more, excellent alternatives exist.
+and modifying YAML data in shell scripts*. If you need more, excellent
+alternatives exist.
 
 *** yq (mikefarah)
 
@@ -56,7 +56,7 @@ existing shyaml scripts or specific simplicity requirements.
 | [[https://github.com/kislyuk/yq][yq (kislyuk)]] | Python | [[https://pyyaml.org/][PyYAML]] ([[https://github.com/yaml/libyaml][libyaml]]) | 1.1 | yes | jq (external) | moderate |
 | [[https://github.com/TomWright/dasel][dasel]] | Go | custom | 1.2 | yes | custom | feature-rich |
 | [[https://github.com/0k/shyaml][shyaml (Python)]] | Python | [[https://pyyaml.org/][PyYAML]] ([[https://github.com/yaml/libyaml][libyaml]]) | 1.1 | no | dot-notation | *simple* |
-| *shyaml-rs* | Rust | [[https://github.com/pantoniou/libfyaml][libfyaml]] | 1.2 | merge | dot-notation | *simple* |
+| *shyaml-rs* | Rust | [[https://github.com/pantoniou/libfyaml][libfyaml]] | 1.2 | yes | dot-notation | *simple* |
 
 *** About the Underlying Parsers
 
@@ -85,6 +85,7 @@ learn - just intuitive dot-notation paths like ~config.database.port~.
 The feature set is deliberately minimal:
 
 - Query access with simple dot-notation paths
+- Value modification via ~set-value~ (set values at any path)
 - YAML merging via ~apply~ (overlay documents onto a base)
 - No format conversion
 - No complex filtering or transformations
@@ -93,13 +94,13 @@ The feature set is deliberately minimal:
 *Choose shyaml-rs if you:*
 - Have existing scripts using the Python shyaml
 - Want the simplest possible interface - no learning curve
-- Just need to extract values from YAML files
+- Need to extract or set values in YAML files
 - Need to merge YAML configurations (overlays, environments)
 - Need streaming support for multi-document YAML
 - Prefer null-terminated output (~-0~ options) for safe shell parsing
 
 *Choose yq or dasel if you:*
-- Need in-place editing or arbitrary modifications
+- Need in-place file editing
 - Want jq-compatible syntax for complex queries
 - Need to convert between formats (YAML/JSON/TOML/XML)
 - Require filters, transformations, or computed values
@@ -1221,6 +1222,86 @@ Error: Invalid merge directive at 'name': !merge:prepend can only be used on seq
 Note: CLI merge policies (~-m~) do not perform this validation since
 users may intentionally specify policies that fall back to other
 behaviors for non-sequence types.
+
+
+*** Set-Value: Modifying YAML Documents
+
+The ~set-value~ action sets a value at a given path in a YAML document from stdin:
+
+#+begin_src docshtest
+$ echo "name: old" | shyaml set-value name "new"
+name: new
+#+end_src
+
+By default, the value is treated as a literal string:
+
+#+begin_src docshtest
+$ echo "config: {}" | shyaml set-value config.host "localhost"
+config:
+  host: localhost
+#+end_src
+
+Nested paths are created automatically if they don't exist:
+
+#+begin_src docshtest
+$ echo "" | shyaml set-value a.b.c "deep"
+a:
+  b:
+    c: deep
+#+end_src
+
+**** Interpreting Value as YAML
+
+Use ~-y~ to interpret the value as YAML instead of a literal string:
+
+#+begin_src docshtest
+$ echo "data: {}" | shyaml set-value data.items "[1, 2, 3]" -y
+data:
+  items:
+  - 1
+  - 2
+  - 3
+#+end_src
+
+This allows setting complex structures:
+
+#+begin_src docshtest
+$ echo "config: {}" | shyaml set-value config.database "{host: localhost, port: 5432}" -y
+config:
+  database:
+    host: localhost
+    port: 5432
+#+end_src
+
+Without ~-y~, the same value would be stored as a literal string:
+
+#+begin_src docshtest
+$ echo "config: {}" | shyaml set-value config.database "{host: localhost, port: 5432}"
+config:
+  database: "{host: localhost, port: 5432}"
+#+end_src
+
+**** Working with Sequences
+
+You can set values at sequence indices:
+
+#+begin_src docshtest
+$ echo "items: [a, b, c]" | shyaml set-value items.1 "changed"
+items:
+- a
+- changed
+- c
+#+end_src
+
+Negative indices work from the end:
+
+#+begin_src docshtest
+$ echo "items: [a, b, c]" | shyaml set-value items.-1 "last"
+items:
+- a
+- b
+- last
+#+end_src
 
 
 ** Contributing

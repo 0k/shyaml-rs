@@ -179,4 +179,19 @@ pub enum Actions {
         #[clap(name = "OVERLAY", required = true)]
         overlays: Vec<String>,
     },
+    SetValue {
+        /// Set a value at a given path in YAML from stdin
+
+        /// The path where to set the value
+        #[clap(name = "KEY")]
+        key: String,
+
+        /// The value to set
+        #[clap(name = "VALUE")]
+        value: String,
+
+        /// Interpret value as YAML instead of literal string
+        #[arg(short = 'y', long)]
+        yaml: bool,
+    },
 }

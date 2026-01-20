@@ -108,21 +108,15 @@ pub fn parse_merge_policies(
     Ok(policies)
 }
 
-/// Convert a path from the form "foo.bar.0.baz" to "foo/bar/0/baz"
+/// Split a dot-notation path into its components.
 ///
-/// This is necessary because libfyaml uses '/' as a path separator, but
-/// shyaml historically uses '.' as a path separator.
-///
-/// In shyaml, `\.` is used to escape a literal '.' in a key name, but this
-/// does not need to be escaped in libfyaml.
-///
-/// To the contrary, libfyaml uses `/{}[]` as special characters in a path, so
-/// these must be escaped using double quoted strings.
-fn convert_path(path: &str) -> String {
-    let mut elements: Vec<String> = Vec::new();
-    // first separate by . if not escaped
+/// Handles escape sequences: `\.` for literal dots, `\\` for literal backslashes.
+/// For example, `a.b\.c.d` becomes `["a", "b.c", "d"]`.
+fn split_path(path: &str) -> Vec<String> {
+    let mut elements = Vec::new();
     let mut escaped = false;
     let mut element = String::new();
+
     for c in path.chars() {
         if escaped {
             escaped = false;
@@ -138,8 +132,23 @@ fn convert_path(path: &str) -> String {
             _ => element.push(c),
         }
     }
-    elements.push(element.clone());
-    // now escape special characters for libfyaml in one go
+    elements.push(element);
+    elements
+}
+
+/// Convert a path from the form "foo.bar.0.baz" to "foo/bar/0/baz"
+///
+/// This is necessary because libfyaml uses '/' as a path separator, but
+/// shyaml historically uses '.' as a path separator.
+///
+/// In shyaml, `\.` is used to escape a literal '.' in a key name, but this
+/// does not need to be escaped in libfyaml.
+///
+/// To the contrary, libfyaml uses `/{}[]` as special characters in a path, so
+/// these must be escaped using double quoted strings.
+fn convert_path(path: &str) -> String {
+    let elements = split_path(path);
+    // escape special characters for libfyaml
     let path = elements
         .into_iter()
         .map(|e| {
@@ -850,7 +859,126 @@ fn value_type_name(value: &fyaml::Value) -> &'static str {
     }
 }
 
-/// Apply overlay files to base YAML from stdin
+pub fn set_value(key: &str, value: &str, parse_as_yaml: bool) -> Result<String, Error> {
+    let base_str = read_stdin()?;
+    let mut base: fyaml::Value = if base_str.trim().is_empty() {
+        fyaml::Value::Mapping(Default::default())
+    } else {
+        base_str
+            .parse()
+            .map_err(|e| BaseError(format!("Failed to parse base YAML: {}", e)))?
+    };
+
+    let new_value: fyaml::Value = if parse_as_yaml {
+        value
+            .parse()
+            .map_err(|e| BaseError(format!("Failed to parse value as YAML: {}", e)))?
+    } else {
+        fyaml::Value::String(value.to_string())
+    };
+
+    set_value_at_path(&mut base, key, new_value)?;
+
+    let output = base
+        .to_yaml_string()
+        .map_err(|e| BaseError(format!("Failed to serialize result: {}", e)))?;
+
+    Ok(output)
+}
+
+fn resolve_sequence_index(path: &str, part: &str, seq_len: usize) -> Result<usize, Error> {
+    let idx: i64 = part.parse().map_err(|_| {
+        PathError(format!(
+            "invalid path '{}', non-integer index '{}' provided on a sequence.",
+            path, part
+        ))
+    })?;
+
+    let resolved = if idx < 0 {
+        let abs_idx = (-idx) as usize;
+        if abs_idx > seq_len {
+            return Err(PathError(format!(
+                "invalid path '{}', index {} is out of range ({} elements in sequence).",
+                path, idx, seq_len
+            )));
+        }
+        seq_len - abs_idx
+    } else {
+        idx as usize
+    };
+
+    if resolved >= seq_len {
+        return Err(PathError(format!(
+            "invalid path '{}', index {} is out of range ({} elements in sequence).",
+            path, idx, seq_len
+        )));
+    }
+
+    Ok(resolved)
+}
+
+fn set_value_at_path(
+    root: &mut fyaml::Value,
+    path: &str,
+    value: fyaml::Value,
+) -> Result<(), Error> {
+    use fyaml::Value;
+
+    let path_parts = split_path(path);
+
+    if path_parts.is_empty() {
+        return Err(PathError("Empty path".to_string()));
+    }
+
+    let mut current = root;
+
+    for (i, part) in path_parts.iter().enumerate() {
+        let is_last = i == path_parts.len() - 1;
+
+        if is_last {
+            match current {
+                Value::Mapping(map) => {
+                    map.insert(Value::String(part.clone()), value);
+                    return Ok(());
+                }
+                Value::Sequence(seq) => {
+                    let idx = resolve_sequence_index(path, part, seq.len())?;
+                    seq[idx] = value;
+                    return Ok(());
+                }
+                _ => {
+                    return Err(PathError(format!(
+                        "invalid path '{}', cannot set value on scalar at '{}'.",
+                        path, part
+                    )));
+                }
+            }
+        }
+
+        match current {
+            Value::Mapping(map) => {
+                let key = Value::String(part.clone());
+                if !map.contains_key(&key) {
+                    map.insert(key.clone(), Value::Mapping(Default::default()));
+                }
+                current = map.get_mut(&key).unwrap();
+            }
+            Value::Sequence(seq) => {
+                let idx = resolve_sequence_index(path, part, seq.len())?;
+                current = &mut seq[idx];
+            }
+            _ => {
+                return Err(PathError(format!(
+                    "invalid path '{}', cannot traverse scalar at '{}'.",
+                    path, part
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub fn apply(
     overlay_paths: &[String],
     policies: &HashMap<String, MergePolicy>,

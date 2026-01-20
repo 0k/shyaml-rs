@@ -206,6 +206,10 @@ pub fn run() -> Result<bool, String> {
             let result = crate::yaml::apply(overlays, &policies)?;
             print!("{}", result);
         }
+        Some(def::Actions::SetValue { key, value, yaml }) => {
+            let result = crate::yaml::set_value(key, value, *yaml)?;
+            print!("{}", result);
+        }
         None => {
             return Err("Missing action".to_string());
         }
