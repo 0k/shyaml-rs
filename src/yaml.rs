@@ -1,3 +1,4 @@
+use crate::tag::{parse_tag, MergeOp, TagError};
 use fyaml::document::{Document, FyParser, Parse};
 use fyaml::node::{MappingIterator, Node, NodeType};
 
@@ -28,6 +29,12 @@ impl From<String> for Error {
 
 impl From<&str> for Error {
     fn from(e: &str) -> Self {
+        Error::BaseError(e.to_string())
+    }
+}
+
+impl From<TagError> for Error {
+    fn from(e: TagError) -> Self {
         Error::BaseError(e.to_string())
     }
 }
@@ -546,7 +553,146 @@ impl<'a> Iterator for MapValueIterator<'a> {
 /// - Replace: overlay completely replaces base
 /// - Prepend: overlay sequence is prepended to base sequence
 /// - Merge: default deep merge behavior
+
+fn extract_merge_directive(value: fyaml::Value) -> Result<(Option<MergeOp>, fyaml::Value), Error> {
+    use fyaml::value::TaggedValue;
+    use fyaml::Value;
+
+    match value {
+        Value::Tagged(tagged) => {
+            let parsed = parse_tag(&tagged.tag)?;
+            let stripped_value = match parsed.remaining {
+                Some(remaining_tag) => Value::Tagged(Box::new(TaggedValue {
+                    tag: remaining_tag,
+                    value: tagged.value,
+                })),
+                None => tagged.value,
+            };
+            Ok((parsed.merge_op, stripped_value))
+        }
+        other => Ok((None, other)),
+    }
+}
+
+fn validate_merge_op_for_type(op: &MergeOp, value: &fyaml::Value, path: &str) -> Result<(), Error> {
+    if !matches!(op, MergeOp::Append | MergeOp::Prepend) {
+        return Ok(());
+    }
+
+    let inner = match value {
+        fyaml::Value::Tagged(t) => &t.value,
+        other => other,
+    };
+
+    if matches!(inner, fyaml::Value::Sequence(_)) {
+        return Ok(());
+    }
+
+    let location = if path.is_empty() {
+        "at root".to_string()
+    } else {
+        format!("at '{}'", path)
+    };
+
+    Err(TypeError(format!(
+        "Invalid merge directive {}: !merge:{} can only be used on sequences, got {}",
+        location,
+        op,
+        value_type_name(inner)
+    )))
+}
+
+/// Merge two YAML values according to merge rules:
+/// - Scalars: child replaces parent
+/// - Mappings: deep recursive merge
+/// - Sequences: append child to parent with deduplication
+///
+/// Merge policies can be specified via:
+/// 1. CLI arguments (--merge-policy PATH=POLICY) - highest priority
+/// 2. Inline tags in overlay (!merge:replace, !merge:append, !merge:prepend)
+/// 3. Default behavior (merge for mappings, append for sequences, replace for scalars)
+///
+/// Inline merge tags are always stripped from the output.
 fn merge_values(
+    base: fyaml::Value,
+    overlay: fyaml::Value,
+    path: &str,
+    policies: &HashMap<String, MergePolicy>,
+) -> Result<fyaml::Value, Error> {
+    // Extract merge directive from overlay (if any) and strip the merge tag
+    let (inline_op, stripped_overlay) = extract_merge_directive(overlay)?;
+
+    // Determine effective policy: CLI > inline tag > default
+    let cli_policy = policies.get(path);
+
+    if let Some(policy) = cli_policy {
+        return apply_policy(*policy, base, stripped_overlay, path, policies);
+    }
+
+    if let Some(op) = inline_op {
+        validate_merge_op_for_type(&op, &stripped_overlay, path)?;
+
+        let policy = match op {
+            MergeOp::Replace => MergePolicy::Replace,
+            MergeOp::Append => MergePolicy::Merge,
+            MergeOp::Prepend => MergePolicy::Prepend,
+        };
+        return apply_policy(policy, base, stripped_overlay, path, policies);
+    }
+
+    // Default behavior with stripped overlay
+    apply_default_merge(base, stripped_overlay, path, policies)
+}
+
+/// Apply a specific merge policy
+fn apply_policy(
+    policy: MergePolicy,
+    base: fyaml::Value,
+    overlay: fyaml::Value,
+    path: &str,
+    policies: &HashMap<String, MergePolicy>,
+) -> Result<fyaml::Value, Error> {
+    use fyaml::value::TaggedValue;
+    use fyaml::Value;
+
+    match policy {
+        MergePolicy::Replace => Ok(overlay),
+        MergePolicy::Prepend => {
+            let (overlay_tag, overlay_inner) = match &overlay {
+                Value::Tagged(t) => (Some(&t.tag), &t.value),
+                other => (None, other),
+            };
+            let base_inner = match &base {
+                Value::Tagged(t) => &t.value,
+                other => other,
+            };
+
+            if let (Value::Sequence(base_seq), Value::Sequence(overlay_seq)) =
+                (base_inner, overlay_inner)
+            {
+                let mut result = overlay_seq.clone();
+                for elt in base_seq {
+                    if !result.contains(elt) {
+                        result.push(elt.clone());
+                    }
+                }
+                let result_value = Value::Sequence(result);
+                return Ok(match overlay_tag {
+                    Some(tag) => Value::Tagged(Box::new(TaggedValue {
+                        tag: tag.clone(),
+                        value: result_value,
+                    })),
+                    None => result_value,
+                });
+            }
+            Ok(overlay)
+        }
+        MergePolicy::Merge => apply_default_merge(base, overlay, path, policies),
+    }
+}
+
+/// Apply default merge behavior based on types
+fn apply_default_merge(
     base: fyaml::Value,
     overlay: fyaml::Value,
     path: &str,
@@ -554,36 +700,24 @@ fn merge_values(
 ) -> Result<fyaml::Value, Error> {
     use fyaml::Value;
 
-    // Check if there's a specific policy for this path
-    if let Some(policy) = policies.get(path) {
-        match policy {
-            MergePolicy::Replace => return Ok(overlay),
-            MergePolicy::Prepend => {
-                // Prepend only makes sense for sequences
-                if let (Value::Sequence(base_seq), Value::Sequence(overlay_seq)) = (&base, &overlay)
-                {
-                    let mut result = overlay_seq.clone();
-                    for elt in base_seq {
-                        if !result.contains(elt) {
-                            result.push(elt.clone());
-                        }
-                    }
-                    return Ok(Value::Sequence(result));
-                }
-                // For non-sequences, prepend acts like replace
-                return Ok(overlay);
-            }
-            MergePolicy::Merge => {
-                // Continue with default merge behavior below
-            }
-        }
-    }
+    // Get the inner value if overlay is tagged (for type comparison)
+    // Note: merge tags already stripped, but other tags may remain
+    let overlay_inner = match &overlay {
+        Value::Tagged(t) => &t.value,
+        other => other,
+    };
 
-    match (&base, &overlay) {
-        // Both null - return null
-        (Value::Null, Value::Null) => Ok(Value::Null),
+    // Get the inner value if base is tagged (for type comparison)
+    let base_inner = match &base {
+        Value::Tagged(t) => &t.value,
+        other => other,
+    };
 
-        // Overlay is null - return base unchanged (at merge level)
+    match (base_inner, overlay_inner) {
+        // Both null - return overlay (which might be tagged null)
+        (Value::Null, Value::Null) => Ok(overlay),
+
+        // Overlay is null - return base unchanged
         // Note: null-deletes-key is handled in mapping merge logic
         (_, Value::Null) => Ok(base),
 
@@ -591,74 +725,105 @@ fn merge_values(
         (Value::Null, _) => Ok(overlay),
 
         // Both are mappings - deep merge
-        (Value::Mapping(base_map), Value::Mapping(overlay_map)) => {
-            let mut result = base_map.clone();
+        (Value::Mapping(_), Value::Mapping(_)) => {
+            // Extract the actual mappings (handling tags)
+            let base_map = match base {
+                Value::Mapping(m) => m,
+                Value::Tagged(t) => match t.value {
+                    Value::Mapping(m) => m,
+                    _ => unreachable!(),
+                },
+                _ => unreachable!(),
+            };
+            let overlay_map = match overlay {
+                Value::Mapping(m) => m,
+                Value::Tagged(t) => match t.value {
+                    Value::Mapping(m) => m,
+                    _ => unreachable!(),
+                },
+                _ => unreachable!(),
+            };
+
+            let mut result = base_map;
             for (key, overlay_value) in overlay_map {
                 // Legacy behavior: explicit null value deletes the key
-                if *overlay_value == Value::Null {
-                    result.shift_remove(key);
+                let is_null = match &overlay_value {
+                    Value::Null => true,
+                    Value::Tagged(t) => matches!(t.value, Value::Null),
+                    _ => false,
+                };
+                if is_null {
+                    result.shift_remove(&key);
                     continue;
                 }
 
-                let key_str = match key {
+                let key_str = match &key {
                     Value::String(s) => s.clone(),
                     _ => format!("{:?}", key),
                 };
                 let new_path = if path.is_empty() {
-                    key_str.clone()
+                    key_str
                 } else {
                     format!("{}.{}", path, key_str)
                 };
 
-                let merged_value = if let Some(base_value) = result.get(key) {
-                    merge_values(
-                        base_value.clone(),
-                        overlay_value.clone(),
-                        &new_path,
-                        policies,
-                    )?
+                let merged_value = if let Some(base_value) = result.get(&key) {
+                    merge_values(base_value.clone(), overlay_value, &new_path, policies)?
                 } else {
-                    overlay_value.clone()
+                    // New key - still need to strip any merge tags
+                    let (_, stripped) = extract_merge_directive(overlay_value)?;
+                    stripped
                 };
-                result.insert(key.clone(), merged_value);
+                result.insert(key, merged_value);
             }
             Ok(Value::Mapping(result))
         }
 
         // Both are sequences - append with deduplication (legacy behavior)
-        // Duplicates from base are removed, then overlay elements appended at end
-        (Value::Sequence(base_seq), Value::Sequence(overlay_seq)) => {
-            let mut result = base_seq.clone();
+        (Value::Sequence(_), Value::Sequence(_)) => {
+            // Extract the actual sequences (handling tags)
+            let base_seq = match base {
+                Value::Sequence(s) => s,
+                Value::Tagged(t) => match t.value {
+                    Value::Sequence(s) => s,
+                    _ => unreachable!(),
+                },
+                _ => unreachable!(),
+            };
+            let overlay_seq = match overlay {
+                Value::Sequence(s) => s,
+                Value::Tagged(t) => match t.value {
+                    Value::Sequence(s) => s,
+                    _ => unreachable!(),
+                },
+                _ => unreachable!(),
+            };
+
+            let mut result = base_seq;
             for elt in overlay_seq {
-                if let Some(pos) = result.iter().position(|x| x == elt) {
+                if let Some(pos) = result.iter().position(|x| x == &elt) {
                     result.remove(pos);
                 }
-                result.push(elt.clone());
+                result.push(elt);
             }
             Ok(Value::Sequence(result))
         }
 
-        // Both are scalars (or same type) - replace
+        // Scalars (same or different types) - replace
         (Value::Bool(_), Value::Bool(_))
         | (Value::Number(_), Value::Number(_))
-        | (Value::String(_), Value::String(_)) => Ok(overlay),
-
-        // Mixed scalar types - replace (scalar replaces scalar)
-        (Value::Bool(_), Value::Number(_))
+        | (Value::String(_), Value::String(_))
+        | (Value::Bool(_), Value::Number(_))
         | (Value::Bool(_), Value::String(_))
         | (Value::Number(_), Value::Bool(_))
         | (Value::Number(_), Value::String(_))
         | (Value::String(_), Value::Bool(_))
         | (Value::String(_), Value::Number(_)) => Ok(overlay),
 
-        // Tagged values - overlay wins (replace)
-        // This includes: tagged+tagged, tagged+scalar, scalar+tagged
-        (Value::Tagged(_), _) | (_, Value::Tagged(_)) => Ok(overlay),
-
         // Type mismatch (mapping vs sequence, scalar vs collection, etc.)
         _ => {
-            let base_type = value_type_name(&base);
-            let overlay_type = value_type_name(&overlay);
+            let base_type = value_type_name(base_inner);
+            let overlay_type = value_type_name(overlay_inner);
             let location = if path.is_empty() {
                 "at root".to_string()
             } else {

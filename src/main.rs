@@ -2,6 +2,7 @@ use colored::*;
 use std::process;
 
 mod cli;
+mod tag;
 mod yaml;
 
 fn main() {

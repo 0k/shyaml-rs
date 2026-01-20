@@ -1089,6 +1089,139 @@ items:
 
 Policies apply to the specified path only; descendants use default merge.
 
+**** Inline Merge Directives
+
+You can specify merge behavior directly in the overlay YAML using tags
+in the ~merge:~ namespace:
+
+#+begin_src docshtest
+$ cat <<EOF > base.yaml
+paths:
+  - /var/log
+  - /var/cache
+config:
+  host: localhost
+  port: 5432
+EOF
+
+$ cat <<EOF > overlay.yaml
+paths: !merge:replace
+  - /opt/data
+config: !merge:replace
+  port: 3306
+EOF
+
+$ cat base.yaml | shyaml apply overlay.yaml
+paths:
+- /opt/data
+config:
+  port: 3306
+#+end_src
+
+Available directives:
+
+- ~!merge:replace~ - completely replace the base value
+- ~!merge:append~ - append to sequence (this is the default for sequences)
+- ~!merge:prepend~ - prepend to sequence
+
+Prepend example:
+
+#+begin_src docshtest
+$ cat <<EOF > base.yaml
+search-paths:
+  - /usr/lib
+  - /lib
+EOF
+
+$ cat <<EOF > overlay.yaml
+search-paths: !merge:prepend
+  - /opt/custom/lib
+EOF
+
+$ cat base.yaml | shyaml apply overlay.yaml
+search-paths:
+- /opt/custom/lib
+- /usr/lib
+- /lib
+#+end_src
+
+***** Compound Tags
+
+Combine merge directives with other tags using semicolon concatenation.
+The merge directive is processed and stripped; other tags are preserved:
+
+#+begin_src docshtest
+$ cat <<EOF > base.yaml
+data: old-value
+EOF
+
+$ cat <<EOF > overlay.yaml
+data: !custom;merge:replace new-value
+EOF
+
+$ cat base.yaml | shyaml apply overlay.yaml
+data: !custom new-value
+#+end_src
+
+***** CLI Policy Overrides Inline Tags
+
+When both a CLI merge policy (~-m~) and an inline tag are specified for
+the same path, the CLI policy takes precedence:
+
+#+begin_src docshtest
+$ cat <<EOF > base.yaml
+items:
+  - a
+  - b
+EOF
+
+$ cat <<EOF > overlay.yaml
+items: !merge:prepend
+  - x
+EOF
+
+$ cat base.yaml | shyaml apply -m "items=replace" overlay.yaml
+items:
+- x
+#+end_src
+
+***** Type Validation
+
+The ~!merge:append~ and ~!merge:prepend~ directives are only valid on
+sequences. Using them on other types produces an error:
+
+#+begin_src docshtest
+$ cat <<EOF > base.yaml
+config:
+  host: localhost
+EOF
+
+$ cat <<EOF > overlay.yaml
+config: !merge:append
+  port: 3306
+EOF
+
+$ cat base.yaml | shyaml apply overlay.yaml
+Error: Invalid merge directive at 'config': !merge:append can only be used on sequences, got mapping
+#+end_src
+
+#+begin_src docshtest
+$ cat <<EOF > base.yaml
+name: alice
+EOF
+
+$ cat <<EOF > overlay.yaml
+name: !merge:prepend bob
+EOF
+
+$ cat base.yaml | shyaml apply overlay.yaml
+Error: Invalid merge directive at 'name': !merge:prepend can only be used on sequences, got string
+#+end_src
+
+Note: CLI merge policies (~-m~) do not perform this validation since
+users may intentionally specify policies that fall back to other
+behaviors for non-sequence types.
+
 
 ** Contributing
 
