@@ -1,0 +1,41 @@
+#!/bin/bash
+
+set -e
+
+if grep -q '%%version%%' Cargo.toml 2>/dev/null; then
+    if [ -x ./autogen.sh ]; then
+        ./autogen.sh
+    else
+        echo "Error: Cargo.toml contains %%version%% placeholder." >&2
+        echo "Run ./autogen.sh first to substitute the version." >&2
+        exit 1
+    fi
+fi
+
+IMAGE_NAME="shyaml-musl-static-builder"
+
+docker build -t "$IMAGE_NAME" - <<'DOCKERFILE'
+FROM rust:slim-bookworm
+
+# Install musl toolchain and dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    musl-tools \
+    clang \
+    libclang-dev \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -u 1000 builder
+
+USER builder
+WORKDIR /home/builder/src
+
+# Install musl target
+RUN rustup target add x86_64-unknown-linux-musl
+DOCKERFILE
+
+docker run --rm -v "$PWD:/home/builder/src" \
+       -e CC_x86_64_unknown_linux_musl=musl-gcc \
+       "$IMAGE_NAME" \
+       cargo build --release --target x86_64-unknown-linux-musl
