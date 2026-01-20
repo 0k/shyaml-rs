@@ -210,6 +210,10 @@ pub fn run() -> Result<bool, String> {
             let result = crate::yaml::set_value(key, value, *yaml)?;
             print!("{}", result);
         }
+        Some(def::Actions::Del { key }) => {
+            let result = crate::yaml::del(key)?;
+            print!("{}", result);
+        }
         None => {
             return Err("Missing action".to_string());
         }

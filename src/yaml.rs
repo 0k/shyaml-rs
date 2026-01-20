@@ -979,6 +979,106 @@ fn set_value_at_path(
     Ok(())
 }
 
+pub fn del(key: &str) -> Result<String, Error> {
+    let base_str = read_stdin()?;
+    let mut base: fyaml::Value = if base_str.trim().is_empty() {
+        return Err(PathError("Cannot delete from empty document".to_string()));
+    } else {
+        base_str
+            .parse()
+            .map_err(|e| BaseError(format!("Failed to parse base YAML: {}", e)))?
+    };
+
+    del_at_path(&mut base, key)?;
+
+    let output = base
+        .to_yaml_string()
+        .map_err(|e| BaseError(format!("Failed to serialize result: {}", e)))?;
+
+    Ok(output)
+}
+
+fn del_at_path(root: &mut fyaml::Value, path: &str) -> Result<(), Error> {
+    use fyaml::Value;
+
+    let path_parts = split_path(path);
+
+    if path_parts.is_empty() || (path_parts.len() == 1 && path_parts[0].is_empty()) {
+        return Err(PathError("Empty path".to_string()));
+    }
+
+    let mut current = root;
+
+    for (i, part) in path_parts.iter().enumerate() {
+        let is_last = i == path_parts.len() - 1;
+
+        if is_last {
+            return match current {
+                Value::Mapping(map) => {
+                    let key = Value::String(part.clone());
+                    if map.shift_remove(&key).is_none() {
+                        Err(PathError(format!(
+                            "invalid path '{}', missing key '{}' in struct.",
+                            path, part
+                        )))
+                    } else {
+                        Ok(())
+                    }
+                }
+                Value::Sequence(seq) => {
+                    let idx = parse_seq_index(part, seq.len(), path)?;
+                    seq.remove(idx);
+                    Ok(())
+                }
+                _ => Err(PathError(format!(
+                    "invalid path '{}', cannot delete from scalar.",
+                    path
+                ))),
+            };
+        }
+
+        current = match current {
+            Value::Mapping(map) => {
+                let key = Value::String(part.clone());
+                map.get_mut(&key).ok_or_else(|| {
+                    PathError(format!(
+                        "invalid path '{}', missing key '{}' in struct.",
+                        path, part
+                    ))
+                })?
+            }
+            Value::Sequence(seq) => {
+                let idx = parse_seq_index(part, seq.len(), path)?;
+                &mut seq[idx]
+            }
+            _ => {
+                return Err(PathError(format!(
+                    "invalid path '{}', cannot traverse scalar at '{}'.",
+                    path, part
+                )));
+            }
+        };
+    }
+
+    Ok(())
+}
+
+fn parse_seq_index(part: &str, len: usize, path: &str) -> Result<usize, Error> {
+    let idx: i64 = part.parse().map_err(|_| {
+        PathError(format!(
+            "invalid path '{}', non-integer index '{}' provided on a sequence.",
+            path, part
+        ))
+    })?;
+    let resolved = if idx < 0 { len as i64 + idx } else { idx };
+    if resolved < 0 || resolved >= len as i64 {
+        return Err(PathError(format!(
+            "invalid path '{}', index {} is out of range ({} elements in sequence).",
+            path, idx, len
+        )));
+    }
+    Ok(resolved as usize)
+}
 pub fn apply(
     overlay_paths: &[String],
     policies: &HashMap<String, MergePolicy>,

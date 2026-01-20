@@ -22,7 +22,7 @@ Key features:
 - Fast, standalone binary with no runtime dependencies
 - Support for YAML document streams
 - Ordered mapping preservation
-- [[#apply-merging-yaml-documents][YAML editing]] via ~apply~ and ~set-value~ actions (new in Rust version)
+- [[#apply-merging-yaml-documents][YAML editing]] via ~apply~, ~set-value~, and ~del~ actions (new in Rust version)
 
 
 ** Alternatives and Comparison
@@ -86,6 +86,7 @@ The feature set is deliberately minimal:
 
 - Query access with simple dot-notation paths
 - Value modification via ~set-value~ (set values at any path)
+- Key deletion via ~del~ (remove keys or sequence elements)
 - YAML merging via ~apply~ (overlay documents onto a base)
 - No format conversion
 - No complex filtering or transformations
@@ -94,7 +95,7 @@ The feature set is deliberately minimal:
 *Choose shyaml-rs if you:*
 - Have existing scripts using the Python shyaml
 - Want the simplest possible interface - no learning curve
-- Need to extract or set values in YAML files
+- Need to extract, set, or delete values in YAML files
 - Need to merge YAML configurations (overlays, environments)
 - Need streaming support for multi-document YAML
 - Prefer null-terminated output (~-0~ options) for safe shell parsing
@@ -1301,6 +1302,64 @@ items:
 - a
 - b
 - last
+#+end_src
+
+
+*** Del: Removing Keys from YAML Documents
+
+The ~del~ action removes a key or sequence element at a given path:
+
+#+begin_src docshtest
+$ cat <<EOF | shyaml del b
+a: 1
+b: 2
+c: 3
+EOF
+a: 1
+c: 3
+#+end_src
+
+Nested paths work as expected:
+
+#+begin_src docshtest
+$ cat <<EOF | shyaml del config.db.port
+config:
+  db:
+    host: localhost
+    port: 5432
+EOF
+config:
+  db:
+    host: localhost
+#+end_src
+
+**** Deleting from Sequences
+
+You can delete elements from sequences by index:
+
+#+begin_src docshtest
+$ echo "items: [a, b, c]" | shyaml del items.1
+items:
+- a
+- c
+#+end_src
+
+Negative indices work from the end:
+
+#+begin_src docshtest
+$ echo "items: [a, b, c]" | shyaml del items.-1
+items:
+- a
+- b
+#+end_src
+
+**** Error Handling
+
+Attempting to delete a non-existent key produces an error:
+
+#+begin_src docshtest
+$ echo "a: 1" | shyaml del nonexistent
+Error: invalid path 'nonexistent', missing key 'nonexistent' in struct.
 #+end_src
 
 

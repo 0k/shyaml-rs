@@ -194,4 +194,11 @@ pub enum Actions {
         #[arg(short = 'y', long)]
         yaml: bool,
     },
+    Del {
+        /// Delete a key/index at a given path in YAML from stdin
+
+        /// The path to delete
+        #[clap(name = "KEY")]
+        key: String,
+    },
 }
