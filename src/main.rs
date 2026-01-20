@@ -6,6 +6,11 @@ mod tag;
 mod yaml;
 
 fn main() {
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     match cli::run() {
         Ok(true) => process::exit(0),
         Ok(false) => process::exit(1),

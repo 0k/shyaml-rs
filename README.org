@@ -1363,6 +1363,62 @@ Error: invalid path 'nonexistent', missing key 'nonexistent' in struct.
 #+end_src
 
 
+*** Compound Actions: Chaining Multiple Commands
+
+Multiple commands can be chained together using the ~\;~ separator.
+Commands are executed sequentially, with each command operating on the
+result of the previous one. Only the final result is output.
+
+#+begin_src docshtest
+$ echo "a: 1" | shyaml set-value b 2 \; set-value c 3
+a: 1
+b: 2
+c: 3
+#+end_src
+
+This is more efficient than piping multiple shyaml calls, as the YAML
+is parsed only once.
+
+**** Combining Different Actions
+
+Any combination of actions can be chained:
+
+#+begin_src docshtest
+$ cat <<EOF | shyaml set-value new-key added \; del remove-me
+keep: 1
+remove-me: 2
+EOF
+keep: 1
+new-key: added
+#+end_src
+
+**** Multi-step Transformations
+
+Build complex transformations step by step:
+
+#+begin_src docshtest
+$ echo "x: 0" | shyaml set-value a 1 \; set-value b 2 \; del x \; set-value c 3
+a: 1
+b: 2
+c: 3
+#+end_src
+
+**** With Multi-document YAML
+
+Compound commands work with multi-document YAML streams. The command
+chain is applied to each document independently:
+
+#+begin_src docshtest
+$ cat <<EOF | shyaml set-value b 10 \; del a | tr '\0' '&'
+a: 1
+---
+a: 2
+EOF
+b: 10
+&b: 10
+#+end_src
+
+
 ** Contributing
 
 Any suggestions or issues are welcome. Push requests are very welcome,

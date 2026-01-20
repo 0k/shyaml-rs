@@ -20,7 +20,8 @@ fyaml-sys = "0.1"
 log = "0.4.20"
 regex = "1.10.3"
 time = { version = "0.3.37", features = ["std", "local-offset", "macros", "formatting" ] }
-fyaml = "0.1"
+fyaml = "0.2"
+indexmap = "2.13.0"
 
 [dev-dependencies]
 indoc = "2"

@@ -1,8 +1,10 @@
 use clap::{Parser, Subcommand};
 
-/// Verifies expressions against environment variables
+/// YAML for the command line
+///
+/// Chain multiple commands with `;` separator (e.g., `shyaml set-value a 1 \; del b`)
 #[derive(Parser)]
-#[command(author, about, long_about=None, disable_version_flag(true))]
+#[command(author, about, long_about=None, disable_version_flag(true), after_help = "Multiple commands can be chained with `;` (escaped as `\\;` in shell).\nExample: shyaml set-value a 1 \\; set-value b 2 \\; del c")]
 pub struct Args {
     /// force color mode (defaults to check tty)
     #[arg(long)]

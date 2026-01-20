@@ -1,9 +1,10 @@
 use crate::tag::{parse_tag, MergeOp, TagError};
-use fyaml::document::{Document, FyParser, Parse};
-use fyaml::node::{MappingIterator, Node, NodeType};
+use fyaml::document::{FyParser, Parse};
+use indexmap::IndexMap;
 
-use std::io::{self, Read};
-use std::rc::Rc;
+use std::io;
+
+pub use fyaml::Value;
 
 #[derive(Debug)]
 pub enum Error {
@@ -136,6 +137,101 @@ fn split_path(path: &str) -> Vec<String> {
     elements
 }
 
+fn resolve_index(part: &str, len: usize, full_path: &str) -> Result<usize, Error> {
+    let idx: i64 = part.parse().map_err(|_| {
+        PathError(format!(
+            "invalid path '{}', non-integer index '{}' provided on a sequence.",
+            full_path, part
+        ))
+    })?;
+
+    let resolved = if idx < 0 {
+        let abs_idx = (-idx) as usize;
+        if abs_idx > len {
+            return Err(PathError(format!(
+                "invalid path '{}', index {} is out of range ({} elements in sequence).",
+                full_path, idx, len
+            )));
+        }
+        len - abs_idx
+    } else {
+        idx as usize
+    };
+
+    if resolved >= len {
+        return Err(PathError(format!(
+            "invalid path '{}', index {} is out of range ({} elements in sequence).",
+            full_path, idx, len
+        )));
+    }
+
+    Ok(resolved)
+}
+
+fn lookup_in_map<'a>(
+    map: &'a IndexMap<Value, Value>,
+    part: &str,
+    path: &str,
+) -> Result<&'a Value, Error> {
+    let string_key = Value::String(part.to_string());
+    if let Some(v) = map.get(&string_key) {
+        return Ok(v);
+    }
+    if part.is_empty() {
+        if let Some(v) = map.get(&Value::Null) {
+            return Ok(v);
+        }
+    }
+    Err(PathError(format!(
+        "invalid path '{}', missing key '{}' in struct.",
+        path, part
+    )))
+}
+
+fn get_at_path<'a>(value: &'a Value, path: Option<&str>) -> Result<&'a Value, Error> {
+    let path = match path {
+        None => return Ok(value),
+        Some(p) => p,
+    };
+
+    let parts = split_path(path);
+    let mut current = value;
+
+    for part in &parts {
+        current = match current {
+            Value::Mapping(map) => lookup_in_map(map, part, path)?,
+            Value::Sequence(seq) => {
+                let idx = resolve_index(part, seq.len(), path)?;
+                &seq[idx]
+            }
+            Value::Tagged(tagged) => {
+                let inner = &tagged.value;
+                match inner {
+                    Value::Mapping(map) => lookup_in_map(map, part, path)?,
+                    Value::Sequence(seq) => {
+                        let idx = resolve_index(part, seq.len(), path)?;
+                        &seq[idx]
+                    }
+                    _ => {
+                        return Err(PathError(format!(
+                            "invalid path '{}', cannot traverse scalar at '{}'.",
+                            path, part
+                        )));
+                    }
+                }
+            }
+            _ => {
+                return Err(PathError(format!(
+                    "invalid path '{}', cannot traverse scalar at '{}'.",
+                    path, part
+                )));
+            }
+        };
+    }
+
+    Ok(current)
+}
+
 /// Convert a path from the form "foo.bar.0.baz" to "foo/bar/0/baz"
 ///
 /// This is necessary because libfyaml uses '/' as a path separator, but
@@ -144,176 +240,111 @@ fn split_path(path: &str) -> Vec<String> {
 /// In shyaml, `\.` is used to escape a literal '.' in a key name, but this
 /// does not need to be escaped in libfyaml.
 ///
-/// To the contrary, libfyaml uses `/{}[]` as special characters in a path, so
-/// these must be escaped using double quoted strings.
-fn convert_path(path: &str) -> String {
-    let elements = split_path(path);
-    // escape special characters for libfyaml
-    let path = elements
-        .into_iter()
-        .map(|e| {
-            let e = e.replace("\\", "\\\\");
-            // if e contains any special characters, double quote the string
-            if e.contains('/')
-                || e.contains('{')
-                || e.contains('}')
-                || e.contains('[')
-                || e.contains(']')
-                || e.contains('\\')
-                || e.is_empty()
-            {
-                format!("\"{:}\"", e.replace('"', "\\\""))
-            } else {
-                e
-            }
-        })
-        .collect::<Vec<String>>()
-        .join("/");
-    log::trace!("Converted path: {}", path);
-    path
+pub fn get_value(path: Option<&str>, value: &Value) -> Result<Value, Error> {
+    let result = get_at_path(value, path)?;
+    Ok(result.clone())
 }
 
-pub fn get_value(
-    path: Option<&str>,
-    to_yaml: bool,
-) -> Result<impl Iterator<Item = Result<String, Error>> + '_, Error> {
-    let parser = Parser::from_stdin()?;
-    log::trace!("got parser");
+pub fn streaming_documents_from_stdin(
+    line_buffered: bool,
+) -> Result<impl Iterator<Item = Result<Value, Error>>, Error> {
+    let parser = FyParser::from_stdin_with_line_buffer(line_buffered)
+        .map_err(|e| BaseError(format!("Failed to create parser: {}", e)))?;
 
-    Ok(parser.traverse(path)?.map(move |node| {
-        log::trace!("got node");
-        let node = node?;
-        if !to_yaml && node.is_scalar() {
-            return Ok(node.to_raw_string()?);
-        }
-        Ok(node.to_string())
+    Ok(parser.doc_iter().map(|doc| {
+        let root_node = match doc.root_node() {
+            Some(node) => node,
+            None => return Ok(Value::Null),
+        };
+        Value::from_node(&root_node)
+            .map_err(|e| BaseError(format!("Failed to convert document: {}", e)))
     }))
 }
 
-fn nt2shyaml(node: &Node) -> Result<String, String> {
-    let tag = node.get_tag()?;
-    match tag {
-        Some(t) => Ok(t.to_string()),
-        None => Ok(match node.get_type() {
-            NodeType::Scalar => {
-                // check if float using regex
-                if regex::Regex::new(r"^-?\d+\.\d+$")
-                    .unwrap()
-                    .is_match(node.to_raw_string()?.as_str())
-                {
-                    "float"
-                } else if regex::Regex::new(r"^-?\d+$")
-                    .unwrap()
-                    .is_match(node.to_raw_string()?.as_str())
-                {
-                    "int"
-                } else {
-                    "str"
-                }
+pub fn serialize(value: &Value) -> Result<String, Error> {
+    value
+        .to_yaml_string()
+        .map_err(|e| BaseError(format!("Failed to serialize YAML: {}", e)))
+}
+
+pub fn serialize_raw(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => match n {
+            fyaml::Number::Int(i) => i.to_string(),
+            fyaml::Number::UInt(u) => u.to_string(),
+            fyaml::Number::Float(f) => f.to_string(),
+        },
+        Value::Bool(b) => b.to_string(),
+        Value::Null => "".to_string(),
+        _ => serialize(value).unwrap_or_default(),
+    }
+}
+
+fn is_float_number(n: &fyaml::Number) -> bool {
+    match n {
+        fyaml::Number::Float(_) => true,
+        _ => false,
+    }
+}
+
+fn value_to_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(n) => {
+            if is_float_number(n) {
+                "float"
+            } else {
+                "int"
             }
-            NodeType::Sequence => "sequence",
-            NodeType::Mapping => "struct",
         }
-        .to_string()),
+        Value::String(_) => "str",
+        Value::Sequence(_) => "sequence",
+        Value::Mapping(_) => "struct",
+        Value::Tagged(t) => match &t.value {
+            Value::Sequence(_) => "sequence",
+            Value::Mapping(_) => "struct",
+            _ => "str",
+        },
     }
 }
 
-struct YamlDoc {
-    _input: String, // keep ref to avoid dropping
-    root_node: Rc<Node>,
-    doc: Document,
-}
+pub fn get_type(path: Option<&str>, value: &Value) -> Result<Value, Error> {
+    let target = get_at_path(value, path)?;
 
-impl YamlDoc {
-    fn traverse(&self, path: Option<&str>) -> Result<Rc<Node>, Error> {
-        // Parse and get root node
-        log::trace!("Root node: {:p}", self.root_node);
-        log::trace!("Path: {:?}", path);
-        match path {
-            Some(p) => self
-                .root_node
-                .node_by_path(&convert_path(p))
-                .ok_or(PathError(format!("Path not found: {:?}", p))),
-            None => Ok(Rc::clone(&self.root_node)),
-        }
+    if let Value::Tagged(t) = target {
+        return Ok(Value::String(t.tag.clone()));
     }
 
-    fn load(_input: String) -> Result<Self, Error> {
-        let doc = _input.parse::<Document>()?;
-        let root_node = Rc::new(doc.root_node().ok_or("Empty YAML document")?);
-        let d = YamlDoc {
-            _input,
-            doc,
-            root_node,
-        };
-        log::trace!("Doc: {:?}", d.doc.to_string());
-        //log::trace!("Input {:?}", input);
-        Ok(d)
-    }
+    Ok(Value::String(value_to_type_name(target).to_string()))
 }
 
-struct Parser {
-    fy_parser: Rc<FyParser>,
-}
+pub fn get_length(path: Option<&str>, value: &Value) -> Result<Value, Error> {
+    let target = get_at_path(value, path)?;
 
-impl Parser {
-    fn from_stdin() -> Result<Self, String> {
-        let fy_parser = FyParser::from_stdin()?;
-        Ok(Parser { fy_parser })
-    }
-    /// traverse applies to each document
-    fn traverse<'a>(
-        self,
-        path: Option<&'a str>,
-    ) -> Result<impl Iterator<Item = Result<Rc<Node>, Error>> + 'a, Error> {
-        // Parse and get root node
-        let doc_iter = self.fy_parser.doc_iter();
-        log::trace!("got doc_iter");
-
-        Ok(doc_iter.map(move |doc| {
-            log::trace!("got doc");
-
-            let root_node = Rc::new(doc.root_node().ok_or("Empty YAML document")?);
-            match path {
-                Some(p) => root_node
-                    .node_by_path(&convert_path(p))
-                    .ok_or(PathError(format!("Path not found: {}", p))),
-                None => Ok(root_node),
+    let len = match target {
+        Value::Sequence(seq) => seq.len(),
+        Value::Mapping(map) => map.len(),
+        Value::Tagged(t) => match &t.value {
+            Value::Sequence(seq) => seq.len(),
+            Value::Mapping(map) => map.len(),
+            _ => {
+                return Err(TypeError(format!(
+                    "get-length does not support '{}' type. Please provide or select a sequence or struct.",
+                    value_to_type_name(target)
+                )))
             }
-        }))
-    }
-}
-
-fn read_stdin() -> Result<String, Error> {
-    // Read input from stdin
-    let mut input = String::new();
-    io::stdin().read_to_string(&mut input)?;
-    // .expect("Failed to read from stdin");
-    log::trace!("Stdin: {:?}", input);
-    Ok(input)
-}
-
-pub fn get_type(path: Option<&str>) -> Result<String, Error> {
-    let doc = YamlDoc::load(read_stdin()?.to_string())?;
-    let node = doc.traverse(path)?;
-
-    Ok(nt2shyaml(&node)?)
-}
-
-pub fn get_length(path: Option<&str>) -> Result<i32, Error> {
-    let doc = YamlDoc::load(read_stdin()?.to_string())?;
-    let node = doc.traverse(path)?;
-
-    match node.get_type() {
-        NodeType::Scalar => {
+        },
+        _ => {
             return Err(TypeError(format!(
-            "get-length does not support '{}' type. Please provide or select a sequence or struct.",
-            nt2shyaml(&node)?
-        )))
+                "get-length does not support '{}' type. Please provide or select a sequence or struct.",
+                value_to_type_name(target)
+            )))
         }
-        NodeType::Sequence => Ok(node.seq_len()?),
-        NodeType::Mapping => Ok(node.map_len()?),
-    }
+    };
+
+    Ok(Value::Number(fyaml::Number::UInt(len as u64)))
 }
 
 ///
@@ -322,235 +353,121 @@ pub fn get_version() -> Result<String, String> {
     fyaml::get_c_version()
 }
 
-pub fn keys<F>(path: Option<&str>, yaml: bool, cb: F) -> Result<(), Error>
-where
-    F: FnMut(Result<String, String>) -> Result<(), String>,
-{
-    let doc = YamlDoc::load(read_stdin()?.to_string())?;
-    let node = doc.traverse(path)?;
-    if !node.is_mapping() {
-        return Err(TypeError(format!(
-            "keys does not support '{}' type. Please provide or select a struct.",
-            nt2shyaml(&node)?
-        )));
-    }
-    let keys = MapKeyIterator::new(node.map_iter());
+pub fn keys(path: Option<&str>, value: &Value) -> Result<Value, Error> {
+    let target = get_at_path(value, path)?;
 
-    fn node_to_raw_string(node: Result<Node, String>) -> Result<String, String> {
-        log::trace!("node_to_raw_string");
-        let node = node?;
-        if node.is_scalar() {
-            return node.to_raw_string();
+    let map = match target {
+        Value::Mapping(m) => m,
+        Value::Tagged(t) => match &t.value {
+            Value::Mapping(m) => m,
+            _ => {
+                return Err(TypeError(format!(
+                    "keys does not support '{}' type. Please provide or select a struct.",
+                    value_to_type_name(target)
+                )))
+            }
+        },
+        _ => {
+            return Err(TypeError(format!(
+                "keys does not support '{}' type. Please provide or select a struct.",
+                value_to_type_name(target)
+            )))
         }
-        Ok(node.to_string())
-    }
-    fn node_to_string(node: Result<Node, String>) -> Result<String, String> {
-        log::trace!("node_to_string");
-        Ok(node?.to_string())
-    }
-    let _ = keys
-        .map(if !yaml {
-            node_to_raw_string
-        } else {
-            node_to_string
-        })
-        .map(cb)
-        .collect::<Vec<_>>();
-    Ok(())
-}
-
-pub fn values<F>(path: Option<&str>, yaml: bool, cb: F) -> Result<(), Error>
-where
-    F: FnMut(Result<String, String>) -> Result<(), String>,
-{
-    let doc = YamlDoc::load(read_stdin()?.to_string())?;
-    let node = doc.traverse(path)?;
-    if !node.is_mapping() {
-        return Err(TypeError(format!(
-            "values does not support '{}' type. Please provide or select a struct.",
-            nt2shyaml(&node)?
-        )));
-    }
-
-    let keys = MapValueIterator::new(node.map_iter());
-
-    fn node_to_raw_string(node: Result<Node, String>) -> Result<String, String> {
-        log::trace!("node_to_raw_string");
-        let node = node?;
-        if node.is_scalar() {
-            return node.to_raw_string();
-        }
-        Ok(node.to_string())
-    }
-    fn node_to_string(node: Result<Node, String>) -> Result<String, String> {
-        log::trace!("node_to_string");
-        Ok(node?.to_string())
-    }
-    let _ = keys
-        .map(if !yaml {
-            node_to_raw_string
-        } else {
-            node_to_string
-        })
-        .map(cb)
-        .collect::<Vec<_>>();
-    Ok(())
-}
-
-pub fn get_values<F>(path: Option<&str>, yaml: bool, mut cb: F) -> Result<(), Error>
-where
-    F: FnMut(Result<String, String>) -> Result<(), String>,
-{
-    let doc = YamlDoc::load(read_stdin()?.to_string())?;
-    let node = doc.traverse(path)?;
-    if !node.is_sequence() && !node.is_mapping() {
-        return Err(TypeError(format!(
-            "get-values does not support '{}' type. Please provide or select a sequence or struct.",
-            nt2shyaml(&node)?
-        )));
-    }
-    if node.is_mapping() {
-        let pairs = node.map_iter();
-
-        fn pair_to_raw_string(
-            pair: Result<(Node, Node), String>,
-        ) -> Result<(String, String), String> {
-            log::trace!("pair_to_raw_string");
-            let (key, value) = pair?;
-            Ok((node_to_raw_string(Ok(key))?, node_to_raw_string(Ok(value))?))
-        }
-        fn pair_to_string(pair: Result<(Node, Node), String>) -> Result<(String, String), String> {
-            log::trace!("pair_to_raw_string");
-            let (key, value) = pair?;
-            Ok((key.to_string(), value.to_string()))
-        }
-        let _ = pairs
-            .map(if !yaml {
-                pair_to_raw_string
-            } else {
-                pair_to_string
-            })
-            .map(|k| {
-                let (k, v) = k?;
-                let _ = cb(Ok(k));
-                let _ = cb(Ok(v));
-                Ok::<(), String>(())
-            })
-            .collect::<Vec<_>>();
-        return Ok(());
     };
 
-    let values = node.seq_iter();
+    let keys: Vec<Value> = map.keys().cloned().collect();
+    Ok(Value::Sequence(keys))
+}
 
-    fn node_to_raw_string(node: Result<Node, String>) -> Result<String, String> {
-        log::trace!("node_to_raw_string");
-        let node = node?;
-        if node.is_scalar() {
-            return node.to_raw_string();
+pub fn values(path: Option<&str>, value: &Value) -> Result<Value, Error> {
+    let target = get_at_path(value, path)?;
+
+    let map = match target {
+        Value::Mapping(m) => m,
+        Value::Tagged(t) => match &t.value {
+            Value::Mapping(m) => m,
+            _ => {
+                return Err(TypeError(format!(
+                    "values does not support '{}' type. Please provide or select a struct.",
+                    value_to_type_name(target)
+                )))
+            }
+        },
+        _ => {
+            return Err(TypeError(format!(
+                "values does not support '{}' type. Please provide or select a struct.",
+                value_to_type_name(target)
+            )))
         }
-        Ok(node.to_string())
-    }
-    fn node_to_string(node: Result<Node, String>) -> Result<String, String> {
-        log::trace!("node_to_string");
-        Ok(node?.to_string())
-    }
-    let _ = values
-        .map(if !yaml {
-            node_to_raw_string
-        } else {
-            node_to_string
-        })
-        .map(cb)
-        .collect::<Vec<_>>();
-    Ok(())
+    };
+
+    let vals: Vec<Value> = map.values().cloned().collect();
+    Ok(Value::Sequence(vals))
 }
 
-fn node_to_raw_string(node: Node) -> Result<String, String> {
-    log::trace!("node_to_raw_string");
-    if node.is_scalar() {
-        return node.to_raw_string();
-    }
-    Ok(node.to_string())
-}
+pub fn get_values(path: Option<&str>, value: &Value) -> Result<Value, Error> {
+    let target = get_at_path(value, path)?;
 
-pub fn key_values<F>(path: Option<&str>, yaml: bool, cb: F) -> Result<(), Error>
-where
-    F: FnMut(Result<(String, String), String>) -> Result<(), String>,
-{
-    let doc = YamlDoc::load(read_stdin()?.to_string())?;
-    let node = doc.traverse(path)?;
-    if !node.is_mapping() {
-        return Err(TypeError(format!(
-            "key-values does not support '{}' type. Please provide or select a struct.",
-            nt2shyaml(&node)?
-        )));
-    }
-
-    let pairs = node.map_iter();
-
-    fn pair_to_raw_string(pair: Result<(Node, Node), String>) -> Result<(String, String), String> {
-        log::trace!("pair_to_raw_string");
-        let (key, value) = pair?;
-        Ok((node_to_raw_string(key)?, node_to_raw_string(value)?))
-    }
-    fn pair_to_string(pair: Result<(Node, Node), String>) -> Result<(String, String), String> {
-        log::trace!("pair_to_raw_string");
-        let (key, value) = pair?;
-        Ok((key.to_string(), value.to_string()))
-    }
-    let _ = pairs
-        .map(if !yaml {
-            pair_to_raw_string
-        } else {
-            pair_to_string
-        })
-        .map(cb)
-        .collect::<Vec<_>>();
-    Ok(())
-}
-
-struct MapKeyIterator<'a> {
-    map_iter: MappingIterator<'a>,
-}
-
-impl<'a> MapKeyIterator<'a> {
-    fn new(map_iter: MappingIterator<'a>) -> MapKeyIterator<'a> {
-        MapKeyIterator { map_iter }
-    }
-}
-
-impl<'a> Iterator for MapKeyIterator<'a> {
-    type Item = Result<Node, String>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.map_iter.next() {
-            Some(Ok((key, _))) => Some(Ok(key)),
-            Some(Err(e)) => Some(Err(e.to_string())),
-            None => None,
+    match target {
+        Value::Sequence(seq) => Ok(Value::Sequence(seq.clone())),
+        Value::Mapping(map) => {
+            let mut result = Vec::new();
+            for (k, v) in map {
+                result.push(k.clone());
+                result.push(v.clone());
+            }
+            Ok(Value::Sequence(result))
         }
+        Value::Tagged(t) => match &t.value {
+            Value::Sequence(seq) => Ok(Value::Sequence(seq.clone())),
+            Value::Mapping(map) => {
+                let mut result = Vec::new();
+                for (k, v) in map {
+                    result.push(k.clone());
+                    result.push(v.clone());
+                }
+                Ok(Value::Sequence(result))
+            }
+            _ => Err(TypeError(format!(
+                "get-values does not support '{}' type. Please provide or select a sequence or struct.",
+                value_to_type_name(target)
+            ))),
+        },
+        _ => Err(TypeError(format!(
+            "get-values does not support '{}' type. Please provide or select a sequence or struct.",
+            value_to_type_name(target)
+        ))),
     }
 }
 
-struct MapValueIterator<'a> {
-    map_iter: MappingIterator<'a>,
-}
+pub fn key_values(path: Option<&str>, value: &Value) -> Result<Value, Error> {
+    let target = get_at_path(value, path)?;
 
-impl<'a> MapValueIterator<'a> {
-    fn new(map_iter: MappingIterator<'a>) -> MapValueIterator<'a> {
-        MapValueIterator { map_iter }
-    }
-}
-
-impl<'a> Iterator for MapValueIterator<'a> {
-    type Item = Result<Node, String>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.map_iter.next() {
-            Some(Ok((_, value))) => Some(Ok(value)),
-            Some(Err(e)) => Some(Err(e.to_string())),
-            None => None,
+    let map = match target {
+        Value::Mapping(m) => m,
+        Value::Tagged(t) => match &t.value {
+            Value::Mapping(m) => m,
+            _ => {
+                return Err(TypeError(format!(
+                    "key-values does not support '{}' type. Please provide or select a struct.",
+                    value_to_type_name(target)
+                )))
+            }
+        },
+        _ => {
+            return Err(TypeError(format!(
+                "key-values does not support '{}' type. Please provide or select a struct.",
+                value_to_type_name(target)
+            )))
         }
+    };
+
+    let mut result = Vec::new();
+    for (k, v) in map {
+        result.push(k.clone());
+        result.push(v.clone());
     }
+    Ok(Value::Sequence(result))
 }
 
 /// Merge two YAML values according to merge rules:
@@ -859,31 +776,22 @@ fn value_type_name(value: &fyaml::Value) -> &'static str {
     }
 }
 
-pub fn set_value(key: &str, value: &str, parse_as_yaml: bool) -> Result<String, Error> {
-    let base_str = read_stdin()?;
-    let mut base: fyaml::Value = if base_str.trim().is_empty() {
-        fyaml::Value::Mapping(Default::default())
-    } else {
-        base_str
-            .parse()
-            .map_err(|e| BaseError(format!("Failed to parse base YAML: {}", e)))?
-    };
-
-    let new_value: fyaml::Value = if parse_as_yaml {
-        value
-            .parse()
-            .map_err(|e| BaseError(format!("Failed to parse value as YAML: {}", e)))?
-    } else {
-        fyaml::Value::String(value.to_string())
-    };
-
+pub fn set_value(key: &str, new_value: Value, mut base: Value) -> Result<Value, Error> {
+    if matches!(base, Value::Null) {
+        base = Value::Mapping(Default::default());
+    }
     set_value_at_path(&mut base, key, new_value)?;
+    Ok(base)
+}
 
-    let output = base
-        .to_yaml_string()
-        .map_err(|e| BaseError(format!("Failed to serialize result: {}", e)))?;
-
-    Ok(output)
+pub fn parse_value(value_str: &str, parse_as_yaml: bool) -> Result<Value, Error> {
+    if parse_as_yaml {
+        value_str
+            .parse()
+            .map_err(|e| BaseError(format!("Failed to parse value as YAML: {}", e)))
+    } else {
+        Ok(Value::String(value_str.to_string()))
+    }
 }
 
 fn resolve_sequence_index(path: &str, part: &str, seq_len: usize) -> Result<usize, Error> {
@@ -979,23 +887,12 @@ fn set_value_at_path(
     Ok(())
 }
 
-pub fn del(key: &str) -> Result<String, Error> {
-    let base_str = read_stdin()?;
-    let mut base: fyaml::Value = if base_str.trim().is_empty() {
+pub fn del(key: &str, mut base: Value) -> Result<Value, Error> {
+    if matches!(base, Value::Null) {
         return Err(PathError("Cannot delete from empty document".to_string()));
-    } else {
-        base_str
-            .parse()
-            .map_err(|e| BaseError(format!("Failed to parse base YAML: {}", e)))?
-    };
-
+    }
     del_at_path(&mut base, key)?;
-
-    let output = base
-        .to_yaml_string()
-        .map_err(|e| BaseError(format!("Failed to serialize result: {}", e)))?;
-
-    Ok(output)
+    Ok(base)
 }
 
 fn del_at_path(root: &mut fyaml::Value, path: &str) -> Result<(), Error> {
@@ -1079,27 +976,20 @@ fn parse_seq_index(part: &str, len: usize, path: &str) -> Result<usize, Error> {
     }
     Ok(resolved as usize)
 }
+
 pub fn apply(
     overlay_paths: &[String],
     policies: &HashMap<String, MergePolicy>,
-) -> Result<String, Error> {
-    // Read base from stdin
-    let base_str = read_stdin()?;
-    let mut result: fyaml::Value = if base_str.trim().is_empty() {
-        fyaml::Value::Null
-    } else {
-        base_str
-            .parse()
-            .map_err(|e| BaseError(format!("Failed to parse base YAML: {}", e)))?
-    };
+    base: Value,
+) -> Result<Value, Error> {
+    let mut result = base;
 
-    // Apply each overlay in order
     for overlay_path in overlay_paths {
         let overlay_str = std::fs::read_to_string(overlay_path)
             .map_err(|e| IoError(format!("Failed to read '{}': {}", overlay_path, e)))?;
 
-        let overlay: fyaml::Value = if overlay_str.trim().is_empty() {
-            fyaml::Value::Null
+        let overlay: Value = if overlay_str.trim().is_empty() {
+            Value::Null
         } else {
             overlay_str
                 .parse()
@@ -1109,10 +999,5 @@ pub fn apply(
         result = merge_values(result, overlay, "", policies)?;
     }
 
-    // Serialize result to YAML
-    let output = result
-        .to_yaml_string()
-        .map_err(|e| BaseError(format!("Failed to serialize result: {}", e)))?;
-
-    Ok(output)
+    Ok(result)
 }
