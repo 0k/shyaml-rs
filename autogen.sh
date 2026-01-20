@@ -100,7 +100,7 @@ get_current_version() {
         echo "$version"
     else
         version=$(echo "$version" | compat_sed "$get_short_tag")
-        echo "${version}.dev$(dev_version_tag)"
+        echo "${version}-dev.$(dev_version_tag)"
     fi
 
 }
