@@ -1,9 +1,9 @@
 use log::LevelFilter::*;
 
 use std::io;
-const DATE_FORMAT_STR: &'static str =
+const DATE_FORMAT_STR: &str =
     "[year]-[month]-[day] [hour]:[minute]:[second] [offset_hour sign:mandatory][offset_minute]";
-const LOG_DIRECTIVE_REGEX: &'static str =
+const LOG_DIRECTIVE_REGEX: &str =
     r"^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*:(TRACE|DEBUG|INFO|WARN|ERROR|OFF)$";
 
 // Converts a level string to the corresponding log::LevelFilter
@@ -84,7 +84,7 @@ pub fn setup(verbosity: u8, logs: Vec<&str>, log_time: bool) -> Result<(), Strin
                   record: &log::Record| {
                 let now = time::OffsetDateTime::now_local()
                     .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
-                let time_str = format!("{}", now.format(&dt_fmt).unwrap()).cyan();
+                let time_str = now.format(&dt_fmt).unwrap().to_string().cyan();
                 let formatted_message = common_format(message, record);
                 out.finish(format_args!("{} {}", time_str, formatted_message));
             },

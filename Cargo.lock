@@ -243,9 +243,9 @@ dependencies = [
 
 [[package]]
 name = "fyaml"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79aae2348e65cd8c4d7c768293c90928094d74be776925528c8295d3685d6742"
+checksum = "378868420a191d3ffb9199051f7720bde5461f8906e313541e972bdf8ddc182d"
 dependencies = [
  "fyaml-sys",
  "indexmap",
@@ -655,13 +655,12 @@ checksum = "a7cee0529a6d40f580e7a5e6c495c8fbfe21b7b52795ed4bb5e62cdf92bc6380"
 
 [[package]]
 name = "shyaml-rs"
-version = "0.1.0"
+version = "0.1.0-dev.202601200952"
 dependencies = [
  "clap",
  "colored",
  "fern",
  "fyaml",
- "fyaml-sys",
  "indexmap",
  "indoc",
  "libc",

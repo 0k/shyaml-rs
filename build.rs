@@ -18,7 +18,7 @@ fn main() {
     write!(
         f,
         "pub const RUSTC_VERSION: &str = \"{}\";",
-        String::from_utf8_lossy(&rustc_version)
+        String::from_utf8_lossy(rustc_version)
     )
     .unwrap();
 }
