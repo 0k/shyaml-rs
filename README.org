@@ -166,6 +166,17 @@ cargo build --release
 
 The binary will be available at ~target/release/shyaml-rs~.
 
+*** Static binary from source
+
+To build a fully static binary with no runtime dependencies (using musl):
+
+#+begin_example
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl
+#+end_example
+
+The static binary will be at ~target/x86_64-unknown-linux-musl/release/shyaml-rs~.
+
 *** Pre-built binaries
 
 Pre-built binaries may be available from the [[https://github.com/0k/shyaml-rs/releases][releases page]].
