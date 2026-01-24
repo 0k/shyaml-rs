@@ -125,6 +125,17 @@ expect significantly faster startup and parsing times, especially
 noticeable when processing many files in a loop or large YAML
 documents.
 
+**** Benchmark Results
+
+| File size | Python shyaml | shyaml-rs (glibc) | shyaml-rs (musl) | Speedup vs Python |
+|-----------+---------------+-------------------+------------------+-------------------|
+| 7KB       | 81 ms         | 2.4 ms            | 2.5 ms           | ~32x              |
+| 70KB      | 109 ms        | 7.5 ms            | 9.1 ms           | ~12-15x           |
+
+The musl build is fully static (no runtime dependencies) with ~4-20%
+overhead vs glibc, depending on file size. For most use cases, the
+difference is negligible.
+
 
 ** Requirements
 
