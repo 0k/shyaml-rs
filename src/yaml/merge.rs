@@ -3,6 +3,7 @@
 //! Provides merge policies, inline merge directives, and overlay application.
 
 use super::error::Error;
+use super::InnerValue;
 use crate::tag::{parse_tag, MergeOp};
 use fyaml::{TaggedValue, Value};
 use std::collections::HashMap;
@@ -89,12 +90,7 @@ fn validate_merge_op_for_type(op: &MergeOp, value: &Value, path: &str) -> Result
         return Ok(());
     }
 
-    let inner = match value {
-        Value::Tagged(t) => &t.value,
-        other => other,
-    };
-
-    if matches!(inner, Value::Sequence(_)) {
+    if value.is_inner_sequence() {
         return Ok(());
     }
 
@@ -108,7 +104,7 @@ fn validate_merge_op_for_type(op: &MergeOp, value: &Value, path: &str) -> Result
         "Invalid merge directive {}: !merge:{} can only be used on sequences, got {}",
         location,
         op,
-        value_type_name(inner)
+        value_type_name(value.inner())
     )))
 }
 
@@ -166,17 +162,13 @@ fn apply_policy(
     match policy {
         MergePolicy::Replace => Ok(overlay),
         MergePolicy::Prepend => {
-            let (overlay_tag, overlay_inner) = match &overlay {
-                Value::Tagged(t) => (Some(&t.tag), &t.value),
-                other => (None, other),
-            };
-            let base_inner = match &base {
-                Value::Tagged(t) => &t.value,
-                other => other,
+            let overlay_tag = match &overlay {
+                Value::Tagged(t) => Some(&t.tag),
+                _ => None,
             };
 
             if let (Value::Sequence(base_seq), Value::Sequence(overlay_seq)) =
-                (base_inner, overlay_inner)
+                (base.inner(), overlay.inner())
             {
                 let mut result = overlay_seq.clone();
                 for elt in base_seq {
@@ -205,15 +197,8 @@ fn apply_default_merge(
     path: &str,
     policies: &HashMap<String, MergePolicy>,
 ) -> Result<Value, Error> {
-    let overlay_inner = match &overlay {
-        Value::Tagged(t) => &t.value,
-        other => other,
-    };
-
-    let base_inner = match &base {
-        Value::Tagged(t) => &t.value,
-        other => other,
-    };
+    let overlay_inner = overlay.inner();
+    let base_inner = base.inner();
 
     match (base_inner, overlay_inner) {
         (Value::Null, Value::Null) => Ok(overlay),
@@ -240,12 +225,7 @@ fn apply_default_merge(
 
             let mut result = base_map;
             for (key, overlay_value) in overlay_map {
-                let is_null = match &overlay_value {
-                    Value::Null => true,
-                    Value::Tagged(t) => matches!(t.value, Value::Null),
-                    _ => false,
-                };
-                if is_null {
+                if overlay_value.is_inner_null() {
                     result.shift_remove(&key);
                     continue;
                 }
@@ -353,4 +333,405 @@ pub fn apply(
     }
 
     Ok(result)
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fyaml::Number;
+    use indexmap::indexmap;
+
+    // -------------------------------------------------------------------------
+    // MergePolicy Parsing Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_merge_policy_from_str_merge() {
+        assert_eq!("merge".parse::<MergePolicy>().unwrap(), MergePolicy::Merge);
+        assert_eq!("MERGE".parse::<MergePolicy>().unwrap(), MergePolicy::Merge);
+    }
+
+    #[test]
+    fn test_merge_policy_from_str_replace() {
+        assert_eq!(
+            "replace".parse::<MergePolicy>().unwrap(),
+            MergePolicy::Replace
+        );
+    }
+
+    #[test]
+    fn test_merge_policy_from_str_prepend() {
+        assert_eq!(
+            "prepend".parse::<MergePolicy>().unwrap(),
+            MergePolicy::Prepend
+        );
+    }
+
+    #[test]
+    fn test_merge_policy_from_str_invalid() {
+        let err = "invalid".parse::<MergePolicy>().unwrap_err();
+        assert!(err.contains("Invalid merge policy"));
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_merge_policies Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_merge_policies_empty() {
+        let policies = parse_merge_policies(None).unwrap();
+        assert!(policies.is_empty());
+    }
+
+    #[test]
+    fn test_parse_merge_policies_single() {
+        let args = vec!["config=replace".to_string()];
+        let policies = parse_merge_policies(Some(&args)).unwrap();
+        assert_eq!(policies.get("config"), Some(&MergePolicy::Replace));
+    }
+
+    #[test]
+    fn test_parse_merge_policies_multiple() {
+        let args = vec![
+            "config=replace".to_string(),
+            "items=prepend".to_string(),
+            "nested.path=merge".to_string(),
+        ];
+        let policies = parse_merge_policies(Some(&args)).unwrap();
+        assert_eq!(policies.get("config"), Some(&MergePolicy::Replace));
+        assert_eq!(policies.get("items"), Some(&MergePolicy::Prepend));
+        assert_eq!(policies.get("nested.path"), Some(&MergePolicy::Merge));
+    }
+
+    #[test]
+    fn test_parse_merge_policies_invalid_format() {
+        let args = vec!["invalid-no-equals".to_string()];
+        let err = parse_merge_policies(Some(&args)).unwrap_err();
+        assert!(err.contains("expected format PATH=POLICY"));
+    }
+
+    #[test]
+    fn test_parse_merge_policies_invalid_policy() {
+        let args = vec!["config=unknown".to_string()];
+        let err = parse_merge_policies(Some(&args)).unwrap_err();
+        assert!(err.contains("Invalid merge policy"));
+    }
+
+    // -------------------------------------------------------------------------
+    // value_type_name Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_value_type_name_all_types() {
+        assert_eq!(value_type_name(&Value::Null), "null");
+        assert_eq!(value_type_name(&Value::Bool(true)), "bool");
+        assert_eq!(value_type_name(&Value::Number(Number::Int(1))), "number");
+        assert_eq!(value_type_name(&Value::String("s".into())), "string");
+        assert_eq!(value_type_name(&Value::Sequence(vec![])), "sequence");
+        assert_eq!(value_type_name(&Value::Mapping(indexmap! {})), "mapping");
+    }
+
+    // -------------------------------------------------------------------------
+    // extract_merge_directive Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_merge_directive_no_tag() {
+        let value = Value::String("hello".to_string());
+        let (op, stripped) = extract_merge_directive(value).unwrap();
+        assert!(op.is_none());
+        assert_eq!(stripped, Value::String("hello".to_string()));
+    }
+
+    #[test]
+    fn test_extract_merge_directive_replace() {
+        let value = Value::Tagged(Box::new(TaggedValue {
+            tag: "!merge:replace".to_string(),
+            value: Value::String("new".to_string()),
+        }));
+        let (op, stripped) = extract_merge_directive(value).unwrap();
+        assert_eq!(op, Some(MergeOp::Replace));
+        assert_eq!(stripped, Value::String("new".to_string()));
+    }
+
+    #[test]
+    fn test_extract_merge_directive_compound_tag() {
+        let value = Value::Tagged(Box::new(TaggedValue {
+            tag: "!custom;merge:prepend".to_string(),
+            value: Value::Sequence(vec![]),
+        }));
+        let (op, stripped) = extract_merge_directive(value).unwrap();
+        assert_eq!(op, Some(MergeOp::Prepend));
+        // Remaining tag should be preserved
+        if let Value::Tagged(t) = stripped {
+            assert_eq!(t.tag, "!custom");
+        } else {
+            panic!("Expected tagged value with remaining tag");
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // merge_values Tests - Scalar Replacement
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_merge_scalars_overlay_wins() {
+        let base = Value::String("old".to_string());
+        let overlay = Value::String("new".to_string());
+        let policies = HashMap::new();
+
+        let result = merge_values(base, overlay, "", &policies).unwrap();
+        assert_eq!(result, Value::String("new".to_string()));
+    }
+
+    #[test]
+    fn test_merge_null_overlay_preserves_base() {
+        let base = Value::String("keep".to_string());
+        let overlay = Value::Null;
+        let policies = HashMap::new();
+
+        let result = merge_values(base, overlay, "", &policies).unwrap();
+        assert_eq!(result, Value::String("keep".to_string()));
+    }
+
+    #[test]
+    fn test_merge_null_base_uses_overlay() {
+        let base = Value::Null;
+        let overlay = Value::String("new".to_string());
+        let policies = HashMap::new();
+
+        let result = merge_values(base, overlay, "", &policies).unwrap();
+        assert_eq!(result, Value::String("new".to_string()));
+    }
+
+    // -------------------------------------------------------------------------
+    // merge_values Tests - Mapping Merge
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_merge_mappings_deep() {
+        let base = Value::Mapping(indexmap! {
+            Value::String("a".to_string()) => Value::Number(Number::Int(1)),
+            Value::String("b".to_string()) => Value::Number(Number::Int(2)),
+        });
+        let overlay = Value::Mapping(indexmap! {
+            Value::String("b".to_string()) => Value::Number(Number::Int(20)),
+            Value::String("c".to_string()) => Value::Number(Number::Int(3)),
+        });
+        let policies = HashMap::new();
+
+        let result = merge_values(base, overlay, "", &policies).unwrap();
+        if let Value::Mapping(map) = result {
+            assert_eq!(map.len(), 3);
+            assert_eq!(
+                map.get(&Value::String("a".to_string())),
+                Some(&Value::Number(Number::Int(1)))
+            );
+            assert_eq!(
+                map.get(&Value::String("b".to_string())),
+                Some(&Value::Number(Number::Int(20)))
+            );
+            assert_eq!(
+                map.get(&Value::String("c".to_string())),
+                Some(&Value::Number(Number::Int(3)))
+            );
+        } else {
+            panic!("Expected mapping");
+        }
+    }
+
+    #[test]
+    fn test_merge_mapping_null_deletes_key() {
+        let base = Value::Mapping(indexmap! {
+            Value::String("keep".to_string()) => Value::Number(Number::Int(1)),
+            Value::String("remove".to_string()) => Value::Number(Number::Int(2)),
+        });
+        let overlay = Value::Mapping(indexmap! {
+            Value::String("remove".to_string()) => Value::Null,
+        });
+        let policies = HashMap::new();
+
+        let result = merge_values(base, overlay, "", &policies).unwrap();
+        if let Value::Mapping(map) = result {
+            assert_eq!(map.len(), 1);
+            assert!(map.contains_key(&Value::String("keep".to_string())));
+            assert!(!map.contains_key(&Value::String("remove".to_string())));
+        } else {
+            panic!("Expected mapping");
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // merge_values Tests - Sequence Merge
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_merge_sequences_append_dedup() {
+        let base = Value::Sequence(vec![
+            Value::String("a".to_string()),
+            Value::String("b".to_string()),
+            Value::String("c".to_string()),
+        ]);
+        let overlay = Value::Sequence(vec![
+            Value::String("b".to_string()), // duplicate
+            Value::String("d".to_string()),
+        ]);
+        let policies = HashMap::new();
+
+        let result = merge_values(base, overlay, "", &policies).unwrap();
+        if let Value::Sequence(seq) = result {
+            // [a, c, b, d] - b moved to where overlay placed it
+            assert_eq!(seq.len(), 4);
+            assert_eq!(seq[0], Value::String("a".to_string()));
+            assert_eq!(seq[1], Value::String("c".to_string()));
+            assert_eq!(seq[2], Value::String("b".to_string()));
+            assert_eq!(seq[3], Value::String("d".to_string()));
+        } else {
+            panic!("Expected sequence");
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // merge_values Tests - Policy Override
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_merge_with_replace_policy() {
+        let base = Value::Mapping(indexmap! {
+            Value::String("a".to_string()) => Value::Number(Number::Int(1)),
+            Value::String("b".to_string()) => Value::Number(Number::Int(2)),
+        });
+        let overlay = Value::Mapping(indexmap! {
+            Value::String("c".to_string()) => Value::Number(Number::Int(3)),
+        });
+        let mut policies = HashMap::new();
+        policies.insert("".to_string(), MergePolicy::Replace);
+
+        let result = merge_values(base, overlay, "", &policies).unwrap();
+        if let Value::Mapping(map) = result {
+            assert_eq!(map.len(), 1);
+            assert!(map.contains_key(&Value::String("c".to_string())));
+        } else {
+            panic!("Expected mapping");
+        }
+    }
+
+    #[test]
+    fn test_merge_sequence_with_prepend_policy() {
+        let base = Value::Sequence(vec![
+            Value::String("a".to_string()),
+            Value::String("b".to_string()),
+        ]);
+        let overlay = Value::Sequence(vec![
+            Value::String("x".to_string()),
+            Value::String("y".to_string()),
+        ]);
+        let mut policies = HashMap::new();
+        policies.insert("".to_string(), MergePolicy::Prepend);
+
+        let result = merge_values(base, overlay, "", &policies).unwrap();
+        if let Value::Sequence(seq) = result {
+            // [x, y, a, b] - overlay comes first
+            assert_eq!(seq.len(), 4);
+            assert_eq!(seq[0], Value::String("x".to_string()));
+            assert_eq!(seq[1], Value::String("y".to_string()));
+            assert_eq!(seq[2], Value::String("a".to_string()));
+            assert_eq!(seq[3], Value::String("b".to_string()));
+        } else {
+            panic!("Expected sequence");
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // merge_values Tests - Type Mismatch Errors
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_merge_type_mismatch_mapping_sequence() {
+        let base = Value::Mapping(indexmap! {});
+        let overlay = Value::Sequence(vec![]);
+        let policies = HashMap::new();
+
+        let err = merge_values(base, overlay, "test.path", &policies).unwrap_err();
+        assert!(matches!(err, Error::Type(_)));
+        assert!(err.to_string().contains("cannot merge"));
+        assert!(err.to_string().contains("at 'test.path'"));
+    }
+
+    #[test]
+    fn test_merge_type_mismatch_at_root() {
+        let base = Value::Mapping(indexmap! {});
+        let overlay = Value::Sequence(vec![]);
+        let policies = HashMap::new();
+
+        let err = merge_values(base, overlay, "", &policies).unwrap_err();
+        assert!(err.to_string().contains("at root"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Inline Merge Directive Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_inline_merge_replace() {
+        let base = Value::Mapping(indexmap! {
+            Value::String("a".to_string()) => Value::Number(Number::Int(1)),
+        });
+        let overlay = Value::Tagged(Box::new(TaggedValue {
+            tag: "!merge:replace".to_string(),
+            value: Value::Mapping(indexmap! {
+                Value::String("b".to_string()) => Value::Number(Number::Int(2)),
+            }),
+        }));
+        let policies = HashMap::new();
+
+        let result = merge_values(base, overlay, "", &policies).unwrap();
+        if let Value::Mapping(map) = result {
+            assert_eq!(map.len(), 1);
+            assert!(map.contains_key(&Value::String("b".to_string())));
+        } else {
+            panic!("Expected mapping");
+        }
+    }
+
+    #[test]
+    fn test_inline_append_on_non_sequence_error() {
+        let base = Value::Mapping(indexmap! {});
+        let overlay = Value::Tagged(Box::new(TaggedValue {
+            tag: "!merge:append".to_string(),
+            value: Value::Mapping(indexmap! {}),
+        }));
+        let policies = HashMap::new();
+
+        let err = merge_values(base, overlay, "config", &policies).unwrap_err();
+        assert!(matches!(err, Error::Type(_)));
+        assert!(err.to_string().contains("!merge:append"));
+        assert!(err.to_string().contains("sequences"));
+    }
+
+    #[test]
+    fn test_cli_policy_overrides_inline_directive() {
+        let base = Value::Sequence(vec![Value::String("a".to_string())]);
+        // Inline says prepend
+        let overlay = Value::Tagged(Box::new(TaggedValue {
+            tag: "!merge:prepend".to_string(),
+            value: Value::Sequence(vec![Value::String("x".to_string())]),
+        }));
+        // CLI says replace
+        let mut policies = HashMap::new();
+        policies.insert("".to_string(), MergePolicy::Replace);
+
+        let result = merge_values(base, overlay, "", &policies).unwrap();
+        // Replace wins - only overlay content
+        if let Value::Sequence(seq) = result {
+            assert_eq!(seq.len(), 1);
+            assert_eq!(seq[0], Value::String("x".to_string()));
+        } else {
+            panic!("Expected sequence");
+        }
+    }
 }

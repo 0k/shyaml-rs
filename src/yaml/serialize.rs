@@ -17,6 +17,7 @@ pub fn serialize_ref(value: ValueRef<'_>) -> Result<String, Error> {
 ///
 /// For scalars, returns the string representation without YAML formatting.
 /// For complex types, emits as YAML.
+#[must_use]
 pub fn serialize_raw_ref(value: ValueRef<'_>) -> String {
     if value.is_null() {
         return String::new();
@@ -60,6 +61,7 @@ pub fn serialize(value: &Value) -> Result<String, Error> {
 }
 
 /// Serialize Value to raw string (without YAML formatting).
+#[must_use]
 pub fn serialize_raw(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),

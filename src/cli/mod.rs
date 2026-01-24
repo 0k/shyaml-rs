@@ -1,14 +1,33 @@
 mod def;
 mod output;
+mod plan;
 include!(concat!(env!("OUT_DIR"), "/rustc_version.rs"));
 use clap::Parser;
 use fyaml::Document;
+use plan::ExecutionMode;
 
 pub mod log;
 
 impl From<crate::yaml::Error> for String {
     fn from(e: crate::yaml::Error) -> Self {
         e.to_string()
+    }
+}
+
+// =============================================================================
+// Error Conversion Trait
+// =============================================================================
+
+/// Extension trait for converting errors to String with `.str_err()`.
+///
+/// This reduces boilerplate from `.map_err(|e| e.to_string())?` to `.str_err()?`.
+trait StringError<T> {
+    fn str_err(self) -> Result<T, String>;
+}
+
+impl<T, E: ToString> StringError<T> for Result<T, E> {
+    fn str_err(self) -> Result<T, String> {
+        self.map_err(|e| e.to_string())
     }
 }
 
@@ -83,6 +102,31 @@ fn normalize_iter_action<'a>(
     }
 }
 
+/// Setup logging and color output based on CLI arguments.
+fn setup_logging_and_colors(cli: &def::Args) -> Result<(), String> {
+    let logs = cli.log.clone().unwrap_or_default();
+    let logs = logs
+        .iter()
+        .flat_map(|log| log.split(','))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<&str>>();
+
+    log::setup(cli.verbose, logs, cli.log_time)?;
+
+    if cli.color && cli.no_color {
+        return Err("Cannot use both --color and --no-color".to_string());
+    }
+    if cli.color {
+        colored::control::set_override(true);
+    }
+    if cli.no_color {
+        colored::control::set_override(false);
+    }
+
+    Ok(())
+}
+
 fn split_compound_args(args: Vec<String>) -> Vec<Vec<String>> {
     let mut groups = Vec::new();
     let mut current_group = Vec::new();
@@ -114,54 +158,128 @@ fn split_compound_args(args: Vec<String>) -> Vec<Vec<String>> {
 }
 
 fn setup_cli_context(args: &[String]) -> Result<def::Args, String> {
-    let cli = def::Args::try_parse_from(args).map_err(|e| e.to_string())?;
-
-    let logs = cli.log.clone().unwrap_or_default();
-    let logs = logs
-        .iter()
-        .flat_map(|log| log.split(','))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<&str>>();
-
-    log::setup(cli.verbose, logs, cli.log_time)?;
-
-    if cli.color && cli.no_color {
-        return Err("Cannot use both --color and --no-color".to_string());
-    }
-    if cli.color {
-        colored::control::set_override(true);
-    }
-    if cli.no_color {
-        colored::control::set_override(false);
-    }
-
+    let cli = def::Args::try_parse_from(args).str_err()?;
+    setup_logging_and_colors(&cli)?;
     Ok(cli)
 }
 
 // =============================================================================
-// Zero-Copy Detection
+// Execution Mode Analysis
 // =============================================================================
 
-/// Check if the action is read-only (can use zero-copy path).
-fn is_readonly_action(action: &Option<def::Actions>) -> bool {
-    matches!(
-        action,
-        Some(def::Actions::GetValue { .. })
-            | Some(def::Actions::GetType { .. })
-            | Some(def::Actions::GetLength { .. })
-            | Some(def::Actions::Keys { .. })
-            | Some(def::Actions::Keys0 { .. })
-            | Some(def::Actions::Values { .. })
-            | Some(def::Actions::Values0 { .. })
-            | Some(def::Actions::KeyValues { .. })
-            | Some(def::Actions::KeyValues0 { .. })
-            | Some(def::Actions::GetValues { .. })
-            | Some(def::Actions::GetValues0 { .. })
-    )
+/// Parse all command groups to extract their actions for analysis.
+fn parse_actions(command_groups: &[Vec<String>]) -> Result<Vec<Option<def::Actions>>, String> {
+    let mut actions = Vec::with_capacity(command_groups.len());
+    for group in command_groups {
+        let cli = def::Args::try_parse_from(group).str_err()?;
+        actions.push(cli.action);
+    }
+    Ok(actions)
 }
 
-fn run_command_chain(
+/// Determine the execution mode for a command chain.
+fn determine_execution_mode(command_groups: &[Vec<String>]) -> Result<ExecutionMode, String> {
+    let actions = parse_actions(command_groups)?;
+    Ok(plan::analyze_chain(&actions))
+}
+
+// =============================================================================
+// DocMode Execution (Editor-based, practical COW)
+// =============================================================================
+
+/// Execute a command chain using DocMode (Editor-based mutations).
+///
+/// This avoids full document cloning - only modified nodes are allocated.
+/// Supports both mapping and sequence mutations via fyaml's Editor.
+fn run_doc_mode_chain(
+    command_groups: &[Vec<String>],
+    doc: &mut Document,
+    multi_doc_yaml: bool,
+) -> Result<(), String> {
+    let _yaml_mode = {
+        let cli = def::Args::try_parse_from(&command_groups[0]).str_err()?;
+        cli.yaml
+    };
+
+    // Apply all mutations
+    for (i, cmd_args) in command_groups.iter().enumerate() {
+        let cli = def::Args::try_parse_from(cmd_args).str_err()?;
+        let is_last = i == command_groups.len() - 1;
+
+        match &cli.action {
+            Some(def::Actions::SetValue { key, value, yaml }) => {
+                crate::yaml::set_value_doc(doc, key, value, *yaml).str_err()?;
+                if is_last {
+                    emit_document(doc, multi_doc_yaml)?;
+                }
+            }
+            Some(def::Actions::Del { key }) => {
+                crate::yaml::del_doc(doc, key)?;
+                if is_last {
+                    emit_document(doc, multi_doc_yaml)?;
+                }
+            }
+            Some(def::Actions::GetValue { .. })
+            | Some(def::Actions::GetType { .. })
+            | Some(def::Actions::GetLength { .. }) => {
+                // Final read-only action: use zero-copy path
+                if is_last {
+                    run_single_readonly(&cli, doc, multi_doc_yaml)?;
+                }
+            }
+            _ => {
+                // This shouldn't happen in DocMode - analyze_chain should have caught it
+                return Err("Unexpected action in DocMode".to_string());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Execute DocMode on empty input (no document).
+fn run_doc_mode_empty(command_groups: &[Vec<String>], multi_doc_yaml: bool) -> Result<(), String> {
+    // Create empty document
+    let mut doc = Document::new().str_err()?;
+
+    // Check if we need to handle empty readonly first
+    let first_cli = def::Args::try_parse_from(&command_groups[0]).str_err()?;
+    if command_groups.len() == 1 && plan::is_readonly(first_cli.action.as_ref().unwrap()) {
+        run_single_readonly_empty(&first_cli)?;
+        return Ok(());
+    }
+
+    // Otherwise, process as normal (mutations will create structure)
+    run_doc_mode_chain(command_groups, &mut doc, multi_doc_yaml)
+}
+
+/// Emit document to stdout, preserving comments and original formatting.
+///
+/// Uses the Document's native emit which preserves comments, quote styles,
+/// and other formatting from the original YAML.
+///
+/// When not in yaml mode (multi_doc_yaml=false), strips leading `---\n` from
+/// output since we use `\0` as document separator instead.
+fn emit_document(doc: &Document, multi_doc_yaml: bool) -> Result<(), String> {
+    let output = doc.emit().str_err()?;
+    // In non-yaml mode, strip document start marker since we use \0 as separator
+    let output = if !multi_doc_yaml {
+        output.strip_prefix("---\n").unwrap_or(&output)
+    } else {
+        &output
+    };
+    print!("{}", output);
+    if multi_doc_yaml && !output.ends_with('\n') {
+        println!();
+    }
+    Ok(())
+}
+
+// =============================================================================
+// ValueMode Execution (fallback, full Value cloning)
+// =============================================================================
+
+fn run_value_mode_chain(
     command_groups: &[Vec<String>],
     initial_value: crate::yaml::Value,
     multi_doc_yaml: bool,
@@ -228,10 +346,8 @@ pub fn run() -> Result<bool, String> {
     let yaml_output = is_yaml_output(&cli);
     let separator = if yaml_output { "---\n" } else { "\0" };
 
-    // Determine if we can use zero-copy path:
-    // - Single command (no chaining)
-    // - Read-only action
-    let use_zero_copy = command_groups.len() == 1 && is_readonly_action(&cli.action);
+    // Determine execution mode for the command chain
+    let exec_mode = determine_execution_mode(&command_groups)?;
 
     use std::io::Write;
 
@@ -239,20 +355,23 @@ pub fn run() -> Result<bool, String> {
     let mut first = true;
 
     for doc_result in doc_iter {
-        let doc = doc_result.map_err(|e| e.to_string())?;
-
         if !first {
             print!("{}", separator);
         }
         first = false;
 
-        if use_zero_copy {
-            // Zero-copy path: work directly with Document
-            run_single_readonly(&cli, &doc, yaml_output)?;
-        } else {
-            // Value path: convert to owned Value for mutations/chains
-            let value = crate::yaml::document_to_value(&doc).map_err(|e| e.to_string())?;
-            run_command_chain(&command_groups, value, yaml_output)?;
+        match exec_mode {
+            ExecutionMode::DocMode => {
+                // DocMode: work directly with Document via Editor (practical COW)
+                let mut doc = doc_result.str_err()?;
+                run_doc_mode_chain(&command_groups, &mut doc, yaml_output)?;
+            }
+            ExecutionMode::ValueMode => {
+                // ValueMode: convert to owned Value (for complex operations like apply, keys, values)
+                let doc = doc_result.str_err()?;
+                let value = crate::yaml::document_to_value(&doc).str_err()?;
+                run_value_mode_chain(&command_groups, value, yaml_output)?;
+            }
         }
 
         if line_buffered {
@@ -262,11 +381,13 @@ pub fn run() -> Result<bool, String> {
 
     if first {
         // Empty input - no multi-doc separation needed
-        if use_zero_copy {
-            // Create empty doc for readonly - handle gracefully
-            run_single_readonly_empty(&cli)?;
-        } else {
-            run_command_chain(&command_groups, crate::yaml::Value::Null, false)?;
+        match exec_mode {
+            ExecutionMode::DocMode => {
+                run_doc_mode_empty(&command_groups, false)?;
+            }
+            ExecutionMode::ValueMode => {
+                run_value_mode_chain(&command_groups, crate::yaml::Value::Null, false)?;
+            }
         }
     }
 
@@ -299,7 +420,7 @@ fn run_single_readonly(
             match crate::yaml::get_value_ref(path, doc) {
                 Ok(value_ref) => {
                     let output = if yaml_mode {
-                        crate::yaml::serialize_ref(value_ref).map_err(|e| e.to_string())?
+                        crate::yaml::serialize_ref(value_ref).str_err()?
                     } else {
                         crate::yaml::serialize_raw_ref(value_ref)
                     };
@@ -329,14 +450,14 @@ fn run_single_readonly(
 
         Some(def::Actions::GetType { path }) => {
             let path = path.as_ref().map(|s| s.as_str());
-            let type_name = crate::yaml::get_type_ref(path, doc).map_err(|e| e.to_string())?;
+            let type_name = crate::yaml::get_type_ref(path, doc).str_err()?;
             println!("{}", type_name);
             Ok(())
         }
 
         Some(def::Actions::GetLength { path }) => {
             let path = path.as_ref().map(|s| s.as_str());
-            let len = crate::yaml::get_length_ref(path, doc).map_err(|e| e.to_string())?;
+            let len = crate::yaml::get_length_ref(path, doc).str_err()?;
             println!("{}", len);
             Ok(())
         }
@@ -346,23 +467,19 @@ fn run_single_readonly(
             let iter_action = normalize_iter_action(action, yaml_mode).unwrap();
             match iter_action.kind {
                 IterKind::Keys => {
-                    let keys =
-                        crate::yaml::keys_ref(iter_action.path, doc).map_err(|e| e.to_string())?;
+                    let keys = crate::yaml::keys_ref(iter_action.path, doc).str_err()?;
                     output::print_items(keys, &iter_action.policy);
                 }
                 IterKind::Values => {
-                    let values = crate::yaml::values_ref(iter_action.path, doc)
-                        .map_err(|e| e.to_string())?;
+                    let values = crate::yaml::values_ref(iter_action.path, doc).str_err()?;
                     output::print_items(values, &iter_action.policy);
                 }
                 IterKind::KeyValues => {
-                    let kv = crate::yaml::key_values_ref(iter_action.path, doc)
-                        .map_err(|e| e.to_string())?;
+                    let kv = crate::yaml::key_values_ref(iter_action.path, doc).str_err()?;
                     output::print_kv_items(kv, &iter_action.policy);
                 }
                 IterKind::GetValues => {
-                    let iter = crate::yaml::get_values_ref(iter_action.path, doc)
-                        .map_err(|e| e.to_string())?;
+                    let iter = crate::yaml::get_values_ref(iter_action.path, doc).str_err()?;
                     output::print_get_values(iter, &iter_action.policy);
                 }
             }
@@ -447,28 +564,10 @@ fn run_single(
     setup_logging: bool,
     multi_doc_yaml: bool,
 ) -> Result<crate::yaml::Value, String> {
-    let cli = def::Args::try_parse_from(args).map_err(|e| e.to_string())?;
+    let cli = def::Args::try_parse_from(args).str_err()?;
 
     if setup_logging {
-        let logs = cli.log.clone().unwrap_or_default();
-        let logs = logs
-            .iter()
-            .flat_map(|log| log.split(','))
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<&str>>();
-
-        log::setup(cli.verbose, logs, cli.log_time)?;
-
-        if cli.color && cli.no_color {
-            return Err("Cannot use both --color and --no-color".to_string());
-        }
-        if cli.color {
-            colored::control::set_override(true);
-        }
-        if cli.no_color {
-            colored::control::set_override(false);
-        }
+        setup_logging_and_colors(&cli)?;
     }
 
     if cli.version {

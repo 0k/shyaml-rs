@@ -1,69 +1,9 @@
 //! Integration tests for the `set-value` action
 
-use std::io::Write;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+mod common;
 
+use common::{assert_output_eq, run_shyaml};
 use indoc::indoc;
-use similar::TextDiff;
-
-fn binary_path() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("target");
-    path.push("debug");
-    path.push("shyaml");
-    path
-}
-
-fn run_shyaml(args: &[&str], stdin_data: &str) -> (String, String, bool) {
-    let binary = binary_path();
-
-    let mut child = Command::new(&binary)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("Failed to spawn shyaml");
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(stdin_data.as_bytes())
-            .expect("Failed to write to stdin");
-    }
-
-    let output = child.wait_with_output().expect("Failed to wait on child");
-
-    (
-        String::from_utf8_lossy(&output.stdout).to_string(),
-        String::from_utf8_lossy(&output.stderr).to_string(),
-        output.status.success(),
-    )
-}
-
-fn assert_output_eq(actual: &str, expected: &str) {
-    if actual != expected {
-        let diff = TextDiff::from_lines(expected, actual);
-        eprintln!();
-        for line in diff
-            .unified_diff()
-            .header("expected", "actual")
-            .to_string()
-            .lines()
-        {
-            if line.starts_with('-') {
-                eprintln!("\x1b[31m{}\x1b[0m", line);
-            } else if line.starts_with('+') {
-                eprintln!("\x1b[32m{}\x1b[0m", line);
-            } else if line.starts_with('@') {
-                eprintln!("\x1b[36m{}\x1b[0m", line);
-            } else {
-                eprintln!("{}", line);
-            }
-        }
-        panic!("Output mismatch - see diff above");
-    }
-}
 
 #[test]
 fn test_set_value_simple() {
@@ -74,13 +14,16 @@ fn test_set_value_simple() {
 
 #[test]
 fn test_set_value_nested_path() {
-    let (stdout, stderr, success) =
-        run_shyaml(&["set-value", "config.host", "localhost"], "config: {}\n");
+    let (stdout, stderr, success) = run_shyaml(
+        &["set-value", "config.host", "localhost"],
+        "config:\n  existing: value\n",
+    );
     assert!(success, "stderr: {}", stderr);
     assert_output_eq(
         &stdout,
         indoc! {"
             config:
+              existing: value
               host: localhost
         "},
     );
@@ -104,13 +47,14 @@ fn test_set_value_creates_intermediate_mappings() {
 fn test_set_value_yaml_flag() {
     let (stdout, stderr, success) = run_shyaml(
         &["set-value", "data.items", "[1, 2, 3]", "-y"],
-        "data: {}\n",
+        "data:\n  existing: value\n",
     );
     assert!(success, "stderr: {}", stderr);
     assert_output_eq(
         &stdout,
         indoc! {"
             data:
+              existing: value
               items:
               - 1
               - 2
@@ -128,13 +72,14 @@ fn test_set_value_yaml_flag_complex_structure() {
             "{host: localhost, port: 5432}",
             "-y",
         ],
-        "config: {}\n",
+        "config:\n  existing: value\n",
     );
     assert!(success, "stderr: {}", stderr);
     assert_output_eq(
         &stdout,
         indoc! {"
             config:
+              existing: value
               db:
                 host: localhost
                 port: 5432
@@ -146,13 +91,14 @@ fn test_set_value_yaml_flag_complex_structure() {
 fn test_set_value_without_yaml_flag_literal() {
     let (stdout, stderr, success) = run_shyaml(
         &["set-value", "config.data", "{host: localhost}"],
-        "config: {}\n",
+        "config:\n  existing: value\n",
     );
     assert!(success, "stderr: {}", stderr);
     assert_output_eq(
         &stdout,
         indoc! {r#"
             config:
+              existing: value
               data: "{host: localhost}"
         "#},
     );
@@ -160,8 +106,10 @@ fn test_set_value_without_yaml_flag_literal() {
 
 #[test]
 fn test_set_value_sequence_index() {
-    let (stdout, stderr, success) =
-        run_shyaml(&["set-value", "items.1", "changed"], "items: [a, b, c]\n");
+    let (stdout, stderr, success) = run_shyaml(
+        &["set-value", "items.1", "changed"],
+        "items:\n  - a\n  - b\n  - c\n",
+    );
     assert!(success, "stderr: {}", stderr);
     assert_output_eq(
         &stdout,
@@ -176,8 +124,10 @@ fn test_set_value_sequence_index() {
 
 #[test]
 fn test_set_value_negative_index() {
-    let (stdout, stderr, success) =
-        run_shyaml(&["set-value", "items.-1", "last"], "items: [a, b, c]\n");
+    let (stdout, stderr, success) = run_shyaml(
+        &["set-value", "items.-1", "last"],
+        "items:\n  - a\n  - b\n  - c\n",
+    );
     assert!(success, "stderr: {}", stderr);
     assert_output_eq(
         &stdout,
@@ -192,8 +142,10 @@ fn test_set_value_negative_index() {
 
 #[test]
 fn test_set_value_negative_index_first() {
-    let (stdout, stderr, success) =
-        run_shyaml(&["set-value", "items.-3", "first"], "items: [a, b, c]\n");
+    let (stdout, stderr, success) = run_shyaml(
+        &["set-value", "items.-3", "first"],
+        "items:\n  - a\n  - b\n  - c\n",
+    );
     assert!(success, "stderr: {}", stderr);
     assert_output_eq(
         &stdout,
@@ -212,8 +164,7 @@ fn test_set_value_index_out_of_range() {
         run_shyaml(&["set-value", "items.5", "x"], "items: [a, b, c]\n");
     assert!(!success);
     assert!(stdout.is_empty());
-    assert!(stderr.contains("out of range"));
-    assert!(stderr.contains("3 elements"));
+    assert!(stderr.contains("out of bounds"));
 }
 
 #[test]
@@ -222,7 +173,7 @@ fn test_set_value_negative_index_out_of_range() {
         run_shyaml(&["set-value", "items.-10", "x"], "items: [a, b, c]\n");
     assert!(!success);
     assert!(stdout.is_empty());
-    assert!(stderr.contains("out of range"));
+    assert!(stderr.contains("out of bounds"));
 }
 
 #[test]
@@ -231,7 +182,7 @@ fn test_set_value_non_integer_index_on_sequence() {
         run_shyaml(&["set-value", "items.foo", "x"], "items: [a, b, c]\n");
     assert!(!success);
     assert!(stdout.is_empty());
-    assert!(stderr.contains("non-integer index"));
+    assert!(stderr.contains("invalid sequence index"));
 }
 
 #[test]

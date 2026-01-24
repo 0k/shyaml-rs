@@ -127,10 +127,10 @@ documents.
 
 **** Benchmark Results
 
-| File size | Python shyaml | yq (mikefarah) | shyaml-rs | vs Python | vs yq  |
-|-----------+---------------+----------------+-----------+-----------+--------|
-| 7KB       | 81 ms         | 4.0 ms         | 1.8 ms    | ~45x      | ~2.2x  |
-| 70KB      | 109 ms        | 12 ms          | 7.8 ms    | ~14x      | ~1.5x  |
+| File size | Python shyaml | yq (mikefarah) | shyaml-rs | vs Python | vs yq |
+|-----------+---------------+----------------+-----------+-----------+-------|
+| 7KB       | 92 ms         | 4.4 ms         | 2.2 ms    | ~42x      | ~2x   |
+| 70KB      | 108 ms        | 12 ms          | 8 ms      | ~14x      | ~1.5x |
 
 shyaml-rs is faster than yq for simple queries due to libfyaml's
 efficient parsing and shyaml's minimal feature set (no expression
@@ -811,6 +811,61 @@ about using the ~--yaml~ (or ~-y~) option to output only strict YAML.
 With the drawback that when you'll want to output string, you'll need to
 call a last time ~shyaml get-value~ to explicitly unquote the YAML.
 
+**** Preserving types with ~-y~
+
+In YAML, ~true~ is a boolean while ~'true'~ is a string. Without ~-y~,
+both would output as ~true~, losing the type distinction:
+
+#+begin_src docshtest
+$ echo "a: true" | shyaml get-value a
+true
+$ echo "a: 'true'" | shyaml get-value a
+true
+#+end_src
+
+With ~-y~, the output preserves the original type so it can be correctly
+re-parsed:
+
+#+begin_src docshtest
+$ echo "a: true" | shyaml get-value -y a
+true
+$ echo "a: 'true'" | shyaml get-value -y a
+'true'
+#+end_src
+
+The type is correctly preserved:
+
+#+begin_src docshtest
+$ echo "a: true" | shyaml get-type a
+bool
+$ echo "a: 'true'" | shyaml get-type a
+str
+#+end_src
+
+The same applies to numbers and null values:
+
+#+begin_src docshtest
+$ echo "a: 123" | shyaml get-type a
+int
+$ echo "a: '123'" | shyaml get-type a
+str
+$ echo "a: 123" | shyaml get-value -y a
+123
+$ echo "a: '123'" | shyaml get-value -y a
+'123'
+#+end_src
+
+#+begin_src docshtest
+$ echo "a: null" | shyaml get-type a
+NoneType
+$ echo "a: 'null'" | shyaml get-type a
+str
+$ echo "a: null" | shyaml get-value -y a
+null
+$ echo "a: 'null'" | shyaml get-value -y a
+'null'
+#+end_src
+
 
 *** Object Tag
 
@@ -1012,6 +1067,33 @@ keep: !foo 1
 #+end_src
 
 This works recursively in nested mappings as well.
+
+**** Null Base Values
+
+When a base value is ~null~ (empty), the overlay value replaces it entirely.
+This allows overlays to populate initially empty sections:
+
+#+begin_src docshtest
+$ cat <<EOF > base.yaml
+config:
+database:
+  host: localhost
+EOF
+
+$ cat <<EOF > overlay.yaml
+config:
+  port: 8080
+EOF
+
+$ cat base.yaml | shyaml apply overlay.yaml
+config:
+  port: 8080
+database:
+  host: localhost
+#+end_src
+
+In this example, ~config:~ in the base has a null value, so the overlay's
+~config~ mapping completely replaces it.
 
 **** Tagged Values
 
@@ -1248,6 +1330,72 @@ users may intentionally specify policies that fall back to other
 behaviors for non-sequence types.
 
 
+*** Preserving Comments and Formatting
+
+When using ~set-value~, ~del~, or ~apply~, shyaml preserves the original
+document's formatting, including comments and style choices (flow vs block):
+
+#+begin_src docshtest
+$ cat <<'EOF' | shyaml set-value database.port 3306
+# Database configuration
+database:
+  host: localhost  # primary host
+  port: 5432
+EOF
+# Database configuration
+database:
+  host: localhost # primary host
+  port: 3306
+#+end_src
+
+Block-style sequences preserve comments and formatting:
+
+#+begin_src docshtest
+$ cat <<'EOF' | shyaml set-value items.1 "modified"
+# My items list
+items:
+  - first   # the first one
+  - second
+  - third
+EOF
+# My items list
+items:
+- first # the first one
+- modified
+- third
+#+end_src
+
+**** Flow Style Limitation
+
+Flow-style collections (~[...]~ and ~{...}~) remain in flow style when
+modified, but are reformatted to multi-line output. This is a limitation
+of the underlying libfyaml library, which preserves the flow-vs-block
+distinction but not the one-line compactness of flow collections:
+
+#+begin_src docshtest
+$ echo "tags: [alpha, beta, gamma]" | shyaml del tags.1
+tags: [
+  alpha,
+  gamma
+  ]
+#+end_src
+
+If you need compact output, consider using block style in your source
+documents, which is preserved correctly:
+
+#+begin_src docshtest
+$ cat <<'EOF' | shyaml del tags.1
+tags:
+  - alpha
+  - beta
+  - gamma
+EOF
+tags:
+- alpha
+- gamma
+#+end_src
+
+
 *** Set-Value: Modifying YAML Documents
 
 The ~set-value~ action sets a value at a given path in a YAML document from stdin:
@@ -1260,7 +1408,7 @@ name: new
 By default, the value is treated as a literal string:
 
 #+begin_src docshtest
-$ echo "config: {}" | shyaml set-value config.host "localhost"
+$ echo "config:" | shyaml set-value config.host "localhost"
 config:
   host: localhost
 #+end_src
@@ -1274,12 +1422,32 @@ a:
     c: deep
 #+end_src
 
+Null values are automatically converted to mappings when setting nested paths:
+
+#+begin_src docshtest
+$ echo "config:" | shyaml set-value config.host "localhost"
+config:
+  host: localhost
+#+end_src
+
+This also works for deeply nested paths through null values:
+
+#+begin_src docshtest
+$ cat <<'EOF' | shyaml set-value a.b.c "value"
+a:
+  b:
+EOF
+a:
+  b:
+    c: value
+#+end_src
+
 **** Interpreting Value as YAML
 
 Use ~-y~ to interpret the value as YAML instead of a literal string:
 
 #+begin_src docshtest
-$ echo "data: {}" | shyaml set-value data.items "[1, 2, 3]" -y
+$ echo "data:" | shyaml set-value data.items "[1, 2, 3]" -y
 data:
   items:
   - 1
@@ -1290,7 +1458,7 @@ data:
 This allows setting complex structures:
 
 #+begin_src docshtest
-$ echo "config: {}" | shyaml set-value config.database "{host: localhost, port: 5432}" -y
+$ echo "config:" | shyaml set-value config.database "{host: localhost, port: 5432}" -y
 config:
   database:
     host: localhost
@@ -1300,7 +1468,7 @@ config:
 Without ~-y~, the same value would be stored as a literal string:
 
 #+begin_src docshtest
-$ echo "config: {}" | shyaml set-value config.database "{host: localhost, port: 5432}"
+$ echo "config:" | shyaml set-value config.database "{host: localhost, port: 5432}"
 config:
   database: "{host: localhost, port: 5432}"
 #+end_src
@@ -1310,7 +1478,12 @@ config:
 You can set values at sequence indices:
 
 #+begin_src docshtest
-$ echo "items: [a, b, c]" | shyaml set-value items.1 "changed"
+$ cat <<'EOF' | shyaml set-value items.1 "changed"
+items:
+  - a
+  - b
+  - c
+EOF
 items:
 - a
 - changed
@@ -1320,7 +1493,12 @@ items:
 Negative indices work from the end:
 
 #+begin_src docshtest
-$ echo "items: [a, b, c]" | shyaml set-value items.-1 "last"
+$ cat <<'EOF' | shyaml set-value items.-1 "last"
+items:
+  - a
+  - b
+  - c
+EOF
 items:
 - a
 - b
@@ -1361,7 +1539,12 @@ config:
 You can delete elements from sequences by index:
 
 #+begin_src docshtest
-$ echo "items: [a, b, c]" | shyaml del items.1
+$ cat <<'EOF' | shyaml del items.1
+items:
+  - a
+  - b
+  - c
+EOF
 items:
 - a
 - c
@@ -1370,7 +1553,12 @@ items:
 Negative indices work from the end:
 
 #+begin_src docshtest
-$ echo "items: [a, b, c]" | shyaml del items.-1
+$ cat <<'EOF' | shyaml del items.-1
+items:
+  - a
+  - b
+  - c
+EOF
 items:
 - a
 - b

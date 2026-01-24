@@ -8,6 +8,7 @@ use super::error::Error;
 ///
 /// Handles escape sequences: `\.` for literal dots, `\\` for literal backslashes.
 /// For example, `a.b\.c.d` becomes `["a", "b.c", "d"]`.
+#[must_use]
 pub fn split_path(path: &str) -> Vec<String> {
     let mut elements = Vec::new();
     let mut escaped = false;

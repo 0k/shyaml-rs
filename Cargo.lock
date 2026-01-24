@@ -243,9 +243,9 @@ dependencies = [
 
 [[package]]
 name = "fyaml"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "378868420a191d3ffb9199051f7720bde5461f8906e313541e972bdf8ddc182d"
+checksum = "db61059dad1dc620bb28fafa38efe59c8592e7dd0ec33340ce3df14ab3d47849"
 dependencies = [
  "fyaml-sys",
  "indexmap",
@@ -655,7 +655,7 @@ checksum = "a7cee0529a6d40f580e7a5e6c495c8fbfe21b7b52795ed4bb5e62cdf92bc6380"
 
 [[package]]
 name = "shyaml-rs"
-version = "0.1.0-dev.202601200952"
+version = "0.3.0"
 dependencies = [
  "clap",
  "colored",
@@ -668,6 +668,7 @@ dependencies = [
  "regex",
  "similar",
  "tempfile",
+ "thiserror",
  "time",
 ]
 
@@ -705,6 +706,26 @@ dependencies = [
  "redox_syscall",
  "rustix",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "thiserror"
+version = "2.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
+dependencies = [
+ "thiserror-impl",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "2.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

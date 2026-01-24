@@ -8,10 +8,12 @@
 //! - [`error`]: Error types for YAML operations
 //! - [`path`]: Path parsing and index resolution
 //! - [`query`]: Query operations (get, type, length, keys, values)
-//! - [`mutation`]: Mutation operations (set, delete)
+//! - [`mutation`]: Mutation operations (set, delete) - Value-based
+//! - [`doc_mutation`]: Editor-based mutations (practical COW)
 //! - [`merge`]: Merge operations for the `apply` command
 //! - [`serialize`]: Serialization utilities
 
+mod doc_mutation;
 mod error;
 pub mod merge;
 mod mutation;
@@ -25,14 +27,52 @@ pub use fyaml::{Document, FyParser, Value};
 #[allow(unused_imports)]
 pub use fyaml::Number;
 
+// =============================================================================
+// InnerValue Trait
+// =============================================================================
+
+/// Extension trait to unwrap Tagged values transparently.
+///
+/// YAML values can be wrapped in `Value::Tagged(_)` which makes pattern matching
+/// verbose. This trait provides a unified way to access the inner value.
+pub trait InnerValue {
+    /// Get the inner value, unwrapping Tagged if present.
+    ///
+    /// For `Value::Tagged(t)`, returns `&t.value`.
+    /// For all other variants, returns `self`.
+    fn inner(&self) -> &Value;
+
+    /// Check if the inner value is a sequence.
+    fn is_inner_sequence(&self) -> bool {
+        matches!(self.inner(), Value::Sequence(_))
+    }
+
+    /// Check if the inner value is null.
+    fn is_inner_null(&self) -> bool {
+        matches!(self.inner(), Value::Null)
+    }
+}
+
+impl InnerValue for Value {
+    fn inner(&self) -> &Value {
+        match self {
+            Value::Tagged(t) => &t.value,
+            other => other,
+        }
+    }
+}
+
 // Re-export error type
 pub use error::Error;
 
 // Re-export merge types
 pub use merge::{apply, parse_merge_policies};
 
-// Re-export mutation functions
+// Re-export mutation functions (Value-based, for fallback/apply)
 pub use mutation::{del, parse_value, set_value};
+
+// Re-export Editor-based mutation functions (practical COW)
+pub use doc_mutation::{del_doc, set_value_doc};
 
 // Re-export query functions (zero-copy)
 pub use query::{

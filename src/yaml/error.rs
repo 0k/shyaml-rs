@@ -3,28 +3,30 @@
 use crate::tag::TagError;
 use fyaml::error::Error as FyError;
 use std::io;
+use thiserror::Error;
 
 /// Error type for YAML operations.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum Error {
     /// Error from fyaml library
-    Fy(FyError),
+    #[error("{0}")]
+    Fy(#[from] FyError),
+
     /// I/O error
+    #[error("{0}")]
     Io(String),
+
     /// Path navigation error
+    #[error("{0}")]
     Path(String),
+
     /// Type mismatch error
+    #[error("{0}")]
     Type(String),
+
     /// Generic error
+    #[error("{0}")]
     Base(String),
-}
-
-impl std::error::Error for Error {}
-
-impl From<FyError> for Error {
-    fn from(e: FyError) -> Self {
-        Error::Fy(e)
-    }
 }
 
 impl From<io::Error> for Error {
@@ -48,17 +50,5 @@ impl From<&str> for Error {
 impl From<TagError> for Error {
     fn from(e: TagError) -> Self {
         Error::Base(e.to_string())
-    }
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            Error::Fy(e) => write!(f, "{}", e),
-            Error::Io(e) => write!(f, "{}", e),
-            Error::Path(e) => write!(f, "{}", e),
-            Error::Type(e) => write!(f, "{}", e),
-            Error::Base(e) => write!(f, "{}", e),
-        }
     }
 }
