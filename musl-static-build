@@ -1,21 +1,212 @@
 #!/bin/bash
 
+## Pinned base image version (like Cargo.lock for reproducibility)
+BASE_IMAGE_VERSION="1.93.0"
+BASE_IMAGE_DIGEST="sha256:38d9e7c33a262bf1c58aecfbdf778205491d703a2196d4abf459e81cfe9f95e4"
+
+
+##
+## Vars
+##
+
 set -e
 
-if grep -q '%%version%%' Cargo.toml 2>/dev/null; then
-    if [ -x ./autogen.sh ]; then
-        ./autogen.sh
-    else
-        echo "Error: Cargo.toml contains %%version%% placeholder." >&2
-        echo "Run ./autogen.sh first to substitute the version." >&2
-        exit 1
-    fi
+## ANSI colors (disabled if not a TTY, overridable via COLOR/NO_COLOR)
+if [ -n "${NO_COLOR:-}" ]; then
+    RED="" GREEN="" RESET=""
+elif [ -n "${COLOR:-}" ] || [ -t 1 ]; then
+    RED=$'\e[31m' GREEN=$'\e[32m' RESET=$'\e[0m'
+else
+    RED="" GREEN="" RESET=""
 fi
 
-IMAGE_NAME="shyaml-musl-static-builder"
 
-docker build -t "$IMAGE_NAME" - <<'DOCKERFILE'
-FROM rust:slim-bookworm
+exname="${0##*/}"
+
+# Cache directory for build artifacts and docker metadata
+CACHE_DIR="${CACHE_DIR:-$PWD/.cache}"
+mkdir -p "${CACHE_DIR}"
+
+# Avoid writing Docker metadata (buildx activity store) into $HOME
+export DOCKER_CONFIG="${CACHE_DIR}/docker"
+
+DIGEST_CACHE_DIR="${CACHE_DIR}/digest"
+CARGO_CACHE_DIR="${CACHE_DIR}/cargo"
+DIGEST_CACHE_MAX_AGE_SECONDS="${DIGEST_CACHE_MAX_AGE_SECONDS:-604800}"  # 7 days
+
+BASE_IMAGE_SUFFIX="slim-bookworm"
+
+
+##
+## Code
+##
+
+
+## Get digest for a tag, with caching (expires after DIGEST_CACHE_MAX_AGE_SECONDS)
+## Usage: get_digest TAG [force]
+##   force: skip cache and fetch from remote
+get_digest() {
+    local tag="$1"
+    local force="${2:-}"
+    local cache_file="${DIGEST_CACHE_DIR}/${tag//\//_}"
+    local digest
+
+    # Check cache unless force refresh
+    if [ -z "$force" ] && [ -f "$cache_file" ]; then
+        local cache_mtime now cache_age
+        cache_mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || echo 0)
+        now=$(date +%s)
+        cache_age=$((now - cache_mtime))
+        if [ "$cache_age" -lt "$DIGEST_CACHE_MAX_AGE_SECONDS" ]; then
+            cat "$cache_file"
+            return 0
+        fi
+    fi
+
+    # Fetch from remote
+    local inspect_output
+    if ! inspect_output=$(docker buildx imagetools inspect "rust:$tag" 2>&1); then
+        echo "Error: Could not inspect image 'rust:$tag'" >&2
+        return 1
+    fi
+    digest=$(printf "%s" "$inspect_output" | grep 'Digest:' | head -n1 | awk '{print $2}')
+
+    # Cache result
+    mkdir -p "${DIGEST_CACHE_DIR}"
+    echo "$digest" > "$cache_file"
+
+    echo "$digest"
+}
+
+get_latest_version() {
+    local url="https://hub.docker.com/v2/repositories/library/rust/tags?page_size=100&name=${BASE_IMAGE_SUFFIX}"
+    local versions=""
+    local page_data
+
+    while [ -n "$url" ]; do
+        page_data=$(curl -s "$url") || return 1
+        versions+=$(printf "%s" "$page_data" |
+            grep -oE "\"name\":\"[0-9]+\.[0-9]+\.[0-9]+-${BASE_IMAGE_SUFFIX}\"" |
+            sed 's/"name":"//;s/"//' |
+            sed "s/-${BASE_IMAGE_SUFFIX}//")
+        versions+=$'\n'
+
+        # Stop if we found at least one version
+        if [ -n "$(echo "$versions" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$')" ]; then
+            break
+        fi
+
+        # Get next page URL
+        url=$(printf "%s" "$page_data" | grep -oE '"next":"[^"]*"' | sed 's/"next":"//;s/"$//' | sed 's/\\u0026/\&/g')
+        [ "$url" = "null" ] && url=""
+    done
+
+    local result
+    result=$(echo "$versions" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)
+    if [ -z "$result" ]; then
+        echo "Error: Could not fetch latest version from Docker Hub" >&2
+        return 1
+    fi
+    echo "$result"
+}
+
+## Verify current pinned version digest matches expected
+## Usage: check_current_digest [force]
+check_current_digest() {
+    local force="${1:-}"
+    local full_tag="${BASE_IMAGE_VERSION}-${BASE_IMAGE_SUFFIX}"
+    local current_digest
+    current_digest=$(get_digest "$full_tag" "$force") || return 1
+
+    if [ "$current_digest" != "$BASE_IMAGE_DIGEST" ]; then
+        echo "${RED}ERROR${RESET}: Digest mismatch for pinned version!" >&2
+        echo "  The remote digest for rust:${full_tag} has changed." >&2
+        echo "  This should not happen for a pinned version tag." >&2
+        echo "  Expected: ${BASE_IMAGE_DIGEST}" >&2
+        echo "  Got:      ${current_digest}" >&2
+        return 1
+    fi
+}
+
+do_check() {
+    check_current_digest force || return 1
+
+    # Check for newer version
+    local latest_version
+    latest_version=$(get_latest_version) || return 1
+
+    if [ "$latest_version" = "$BASE_IMAGE_VERSION" ]; then
+        echo "${GREEN}Up to date.${RESET}" >&2
+        return 0
+    fi
+
+    local latest_digest
+    latest_digest=$(get_digest "${latest_version}-${BASE_IMAGE_SUFFIX}" force) || return 1
+    echo "UPDATE AVAILABLE:"
+    echo "  Current: rust:${full_tag}"
+    echo "  Latest:  rust:${latest_version}-${BASE_IMAGE_SUFFIX}"
+    echo
+    echo "To update, run:"
+    echo "  $exname update ${latest_version}"
+    echo
+    echo "Or to auto-update to latest:"
+    echo "  $exname update"
+    return 0
+}
+
+do_update() {
+    local new_version="$1"
+    local msg=""
+
+    if [ -z "$new_version" ]; then
+        new_version=$(get_latest_version) || return 1
+        msg=" latest"
+    fi
+
+    if [ "$new_version" = "$BASE_IMAGE_VERSION" ]; then
+        check_current_digest force || return 1
+        echo "Already at${msg} version ${new_version}, digest verified." >&2
+        return 0
+    fi
+
+    local full_tag="${new_version}-${BASE_IMAGE_SUFFIX}"
+
+    # Fetch new digest (force refresh)
+    local new_digest
+    new_digest=$(get_digest "$full_tag" force) || return 1
+    echo "Update script: ${BASE_IMAGE_VERSION} -> ${new_version}" >&2
+
+    # Update the script itself
+    exec sed -i \
+        -e "s/^BASE_IMAGE_VERSION=.*/BASE_IMAGE_VERSION=\"${new_version}\"/" \
+        -e "s/^BASE_IMAGE_DIGEST=.*/BASE_IMAGE_DIGEST=\"${new_digest}\"/" \
+        "$0"
+}
+
+do_build() {
+    if grep -q '%%version%%' Cargo.toml 2>/dev/null; then
+        if [ -x ./autogen.sh ]; then
+            ./autogen.sh
+        else
+            echo "Error: Cargo.toml contains %%version%% placeholder." >&2
+            echo "Run ./autogen.sh first to substitute the version." >&2
+            return 1
+        fi
+    fi
+
+    ## Get and verify digest (with weekly cache expiry)
+    check_current_digest || return 1
+
+    local base_image_by_digest="rust@${BASE_IMAGE_DIGEST}"
+    local digest_short="${BASE_IMAGE_DIGEST#sha256:}"
+    digest_short="${digest_short:0:12}"
+    local image_name="shyaml-musl-builder:${digest_short}"
+
+    ## Skip build if image already exists locally
+    if ! docker image inspect "$image_name" >/dev/null 2>&1; then
+        docker build --build-arg BASE_TAG="${base_image_by_digest}" -t "$image_name" - <<'DOCKERFILE'
+ARG BASE_TAG=rust:slim-bookworm
+FROM ${BASE_TAG}
 
 # Install musl toolchain and dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -34,8 +225,36 @@ WORKDIR /home/builder/src
 # Install musl target
 RUN rustup target add x86_64-unknown-linux-musl
 DOCKERFILE
+    fi
 
-docker run --rm -v "$PWD:/home/builder/src" \
-       -e CC_x86_64_unknown_linux_musl=musl-gcc \
-       "$IMAGE_NAME" \
-       cargo build --release --target x86_64-unknown-linux-musl
+    ## Persist cargo cache (registry, git) between runs
+    mkdir -p "${CARGO_CACHE_DIR}"
+
+    docker run --rm \
+           -v "$PWD:/home/builder/src" \
+           -v "${CARGO_CACHE_DIR}:/home/builder/.cargo" \
+           -e CARGO_HOME=/home/builder/.cargo \
+           -e CC_x86_64_unknown_linux_musl=musl-gcc \
+           "$image_name" \
+           cargo build --release --target x86_64-unknown-linux-musl
+
+    echo "${GREEN}Successfully${RESET} built target/x86_64-unknown-linux-musl/release/shyaml"
+}
+
+# Handle commands
+case "${1:-}" in
+    check)
+        do_check || exit 1
+        ;;
+    update)
+        do_update "$2" || exit 1
+        ;;
+    ""|build)
+        do_build || exit 1
+        ;;
+    *)
+        echo "Unknown command: $1" >&2
+        echo "Usage: $exname [check|update [VERSION]|build]" >&2
+        exit 1
+        ;;
+esac
