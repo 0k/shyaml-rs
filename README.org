@@ -127,14 +127,15 @@ documents.
 
 **** Benchmark Results
 
-| File size | Python shyaml | shyaml-rs (glibc) | shyaml-rs (musl) | Speedup vs Python |
-|-----------+---------------+-------------------+------------------+-------------------|
-| 7KB       | 81 ms         | 2.4 ms            | 2.5 ms           | ~32x              |
-| 70KB      | 109 ms        | 7.5 ms            | 9.1 ms           | ~12-15x           |
+| File size | Python shyaml | yq (mikefarah) | shyaml-rs | vs Python | vs yq  |
+|-----------+---------------+----------------+-----------+-----------+--------|
+| 7KB       | 81 ms         | 4.0 ms         | 1.8 ms    | ~45x      | ~2.2x  |
+| 70KB      | 109 ms        | 12 ms          | 7.8 ms    | ~14x      | ~1.5x  |
 
-The musl build is fully static (no runtime dependencies) with ~4-20%
-overhead vs glibc, depending on file size. For most use cases, the
-difference is negligible.
+shyaml-rs is faster than yq for simple queries due to libfyaml's
+efficient parsing and shyaml's minimal feature set (no expression
+language to parse). The musl static build adds ~4-20% overhead vs
+glibc, depending on file size.
 
 
 ** Requirements
