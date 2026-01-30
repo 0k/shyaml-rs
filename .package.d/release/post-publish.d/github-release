@@ -12,9 +12,9 @@ VERSION=$(git describe --tags --exact-match 2>/dev/null) || {
 
 echo "=== Building static musl binary ===" >&2
 
-./musl-build
+./musl-static-build
 
-BINARY="target/alpine-musl/release/shyaml-rs"
+BINARY="target/x86_64-unknown-linux-musl/release/shyaml"
 if [ ! -f "$BINARY" ]; then
     echo "Error: musl binary not found at $BINARY" >&2
     exit 1
@@ -22,8 +22,6 @@ fi
 
 ARTIFACT="shyaml-rs-${VERSION}-x86_64-linux-musl"
 cp "$BINARY" "$ARTIFACT"
-gzip -f "$ARTIFACT"
-ARTIFACT="${ARTIFACT}.gz"
 
 echo "Built: $ARTIFACT ($(du -h "$ARTIFACT" | cut -f1))" >&2
 
