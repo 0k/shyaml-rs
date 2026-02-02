@@ -867,6 +867,85 @@ $ echo "a: 'null'" | shyaml get-value -y a
 #+end_src
 
 
+**** Null-terminated YAML output (~-0~ with ~-y~)
+
+The ~-0~ (null-terminated) variants can be combined with ~-y~ to get
+strict YAML output for each field while keeping ~\0~ as the separator.
+This is useful when shell scripts need to re-feed individual values
+into ~shyaml~ for further processing, while preserving type information.
+
+The output format is the same as without ~-y~: each field is followed
+directly by a ~\0~ byte, with no extra characters between the value and
+the separator.
+
+For scalars, ~-y~ preserves type-aware quoting:
+
+#+begin_src docshtest
+$ cat <<EOF | shyaml keys-0 -y | tr '\0' '|'
+a: 1
+b: hello
+EOF
+a|b|
+#+end_src
+
+#+begin_src docshtest
+$ cat <<EOF | shyaml values-0 -y | tr '\0' '|'
+a: 1
+b: hello
+EOF
+1|hello|
+#+end_src
+
+#+begin_src docshtest
+$ cat <<EOF | shyaml key-values-0 -y | tr '\0' '|'
+a: 1
+b: hello
+EOF
+a|1|b|hello|
+#+end_src
+
+This works the same with ~get-values-0 -y~ on sequences:
+
+#+begin_src docshtest
+$ cat <<EOF | shyaml get-values-0 -y | tr '\0' '|'
+- first
+- second
+EOF
+first|second|
+#+end_src
+
+And on structs (which outputs key-value pairs):
+
+#+begin_src docshtest
+$ cat <<EOF | shyaml get-values-0 -y | tr '\0' '|'
+x: 10
+y: 20
+EOF
+x|10|y|20|
+#+end_src
+
+Type-distinguishing quotes are preserved, so a string ~'true'~ stays
+quoted while a boolean ~true~ does not:
+
+#+begin_src docshtest
+$ echo "a: 'true'" | shyaml values-0 -y | tr '\0' '|'
+'true'|
+#+end_src
+
+Complex values (sequences, mappings) naturally contain newlines in their
+YAML representation:
+
+#+begin_src docshtest
+$ cat <<EOF | shyaml values-0 -y | tr '\0' '|'
+items:
+  - one
+  - two
+EOF
+- one
+- two|
+#+end_src
+
+
 *** Object Tag
 
 YAML spec allows object tags which allows you to map local data to
@@ -1405,12 +1484,20 @@ $ echo "name: old" | shyaml set-value name "new"
 name: new
 #+end_src
 
-By default, the value is treated as a literal string:
+By default, simple scalar values are recognized as their natural YAML
+type: numbers stay as numbers, booleans as booleans, and plain text
+as strings:
 
 #+begin_src docshtest
 $ echo "config:" | shyaml set-value config.host "localhost"
 config:
   host: localhost
+#+end_src
+
+#+begin_src docshtest
+$ echo "config:" | shyaml set-value config.port 8080
+config:
+  port: 8080
 #+end_src
 
 Nested paths are created automatically if they don't exist:
@@ -1442,9 +1529,35 @@ a:
     c: value
 #+end_src
 
+**** Scalar type recognition
+
+Without ~-y~, scalar values are recognized as their natural YAML type.
+Numbers, booleans, and null are stored as their respective types, not
+as strings:
+
+#+begin_src docshtest
+$ echo "x:" | shyaml set-value x.port 8080 \; set-value x.debug true \; set-value x.name hello
+x:
+  port: 8080
+  debug: true
+  name: hello
+#+end_src
+
+However, YAML structures (sequences and mappings) are *not* parsed
+without ~-y~ — they are treated as literal strings:
+
+#+begin_src docshtest
+$ echo "a:" | shyaml set-value a.items "[1, 2, 3]"
+a:
+  items: "[1, 2, 3]"
+#+end_src
+
+Use ~-y~ when you need to set complex structures (see below).
+
 **** Interpreting Value as YAML
 
-Use ~-y~ to interpret the value as YAML instead of a literal string:
+Use ~-y~ to interpret the value as full YAML, including structures
+like sequences and mappings:
 
 #+begin_src docshtest
 $ echo "data:" | shyaml set-value data.items "[1, 2, 3]" -y
@@ -1601,6 +1714,16 @@ remove-me: 2
 EOF
 keep: 1
 new-key: added
+#+end_src
+
+**** Reading After Mutations
+
+Chain mutations with read actions to transform then extract, keep type
+information:
+
+#+begin_src docshtest
+$ echo "a: 'true'" | shyaml get-value \; values-0 -y | tr '\0' '|'
+'true'|
 #+end_src
 
 **** Multi-step Transformations

@@ -72,9 +72,10 @@ impl ActionKind {
 /// - `set-value a 1` -> DocMode
 /// - `set-value a 1 ; set-value b 2` -> DocMode
 /// - `set-value a 1 ; del c ; get-value a` -> DocMode (final read-only)
+/// - `keys foo` -> DocMode (single derived uses zero-copy)
 /// - `keys foo ; get-value 0` -> ValueMode (derived action not at end)
 /// - `apply overlay.yaml` -> ValueMode (complex)
-/// - `set-value a 1 ; keys foo` -> ValueMode (derived, though at end we still need Value output)
+/// - `set-value a 1 ; keys foo` -> ValueMode (derived in chain needs Value output)
 pub fn analyze_chain(actions: &[Option<Actions>]) -> ExecutionMode {
     if actions.is_empty() {
         return ExecutionMode::DocMode;
@@ -85,8 +86,10 @@ pub fn analyze_chain(actions: &[Option<Actions>]) -> ExecutionMode {
         if let Some(action) = &actions[0] {
             let kind = ActionKind::from_action(action);
             return match kind {
-                ActionKind::Mutation | ActionKind::ReadOnly => ExecutionMode::DocMode,
-                ActionKind::Derived | ActionKind::Complex => ExecutionMode::ValueMode,
+                ActionKind::Mutation | ActionKind::ReadOnly | ActionKind::Derived => {
+                    ExecutionMode::DocMode
+                }
+                ActionKind::Complex => ExecutionMode::ValueMode,
             };
         }
         return ExecutionMode::DocMode;
@@ -136,6 +139,11 @@ pub fn analyze_chain(actions: &[Option<Actions>]) -> ExecutionMode {
 /// Check if an action is read-only (can use zero-copy from Document).
 pub fn is_readonly(action: &Actions) -> bool {
     matches!(ActionKind::from_action(action), ActionKind::ReadOnly)
+}
+
+/// Check if an action is derived (iteration: keys, values, etc.).
+pub fn is_derived(action: &Actions) -> bool {
+    matches!(ActionKind::from_action(action), ActionKind::Derived)
 }
 
 // =============================================================================
@@ -202,8 +210,8 @@ mod tests {
     }
 
     #[test]
-    fn test_single_derived_is_value_mode() {
-        assert_eq!(analyze_chain(&[keys()]), ExecutionMode::ValueMode);
+    fn test_single_derived_is_doc_mode() {
+        assert_eq!(analyze_chain(&[keys()]), ExecutionMode::DocMode);
     }
 
     #[test]

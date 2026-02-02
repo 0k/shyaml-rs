@@ -15,14 +15,26 @@ pub fn set_value(key: &str, new_value: Value, mut base: Value) -> Result<Value, 
     Ok(base)
 }
 
-/// Parse a string as either a literal string or YAML.
+/// Parse a string as either full YAML or with scalar type inference.
+///
+/// With `parse_as_yaml = true` (`-y` flag): the value is parsed as full YAML,
+/// including structures like sequences and mappings.
+///
+/// With `parse_as_yaml = false` (default): scalar type inference is applied —
+/// numbers, booleans, and null are recognized as their native YAML types,
+/// but YAML structures (sequences, mappings) are kept as literal strings.
 pub fn parse_value(value_str: &str, parse_as_yaml: bool) -> Result<Value, Error> {
     if parse_as_yaml {
         value_str
             .parse()
             .map_err(|e| Error::Base(format!("Failed to parse value as YAML: {}", e)))
     } else {
-        Ok(Value::String(value_str.to_string()))
+        // Scalar type inference: parse as YAML, accept only scalar results.
+        // Sequences and mappings are kept as literal strings.
+        match value_str.parse::<Value>() {
+            Ok(v @ (Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_))) => Ok(v),
+            _ => Ok(Value::String(value_str.to_string())),
+        }
     }
 }
 
@@ -175,10 +187,34 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_value_literal_preserves_yaml_syntax() {
-        // Without parse_as_yaml, YAML-like strings are kept as strings
+    fn test_parse_value_literal_preserves_yaml_structures() {
+        // Without parse_as_yaml, YAML structures are kept as strings
         let result = parse_value("[1, 2, 3]", false).unwrap();
         assert_eq!(result, Value::String("[1, 2, 3]".to_string()));
+
+        let result = parse_value("{a: 1, b: 2}", false).unwrap();
+        assert_eq!(result, Value::String("{a: 1, b: 2}".to_string()));
+    }
+
+    #[test]
+    fn test_parse_value_literal_infers_number() {
+        let result = parse_value("42", false).unwrap();
+        assert!(matches!(result, Value::Number(_)));
+    }
+
+    #[test]
+    fn test_parse_value_literal_infers_bool() {
+        let result = parse_value("true", false).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_value("false", false).unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn test_parse_value_literal_infers_null() {
+        let result = parse_value("null", false).unwrap();
+        assert_eq!(result, Value::Null);
     }
 
     #[test]

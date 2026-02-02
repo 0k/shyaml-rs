@@ -176,9 +176,17 @@ pub fn set_value_doc(
             .trim()
             .to_string()
     } else {
-        // Treat as literal string - need to emit as valid YAML
-        // Use fyaml's Value to properly quote the string
-        let v = fyaml::Value::String(value_str.to_string());
+        // Scalar type inference: parse as YAML, accept only scalar results.
+        // Sequences and mappings are kept as literal strings.
+        let v = match value_str.parse::<fyaml::Value>() {
+            Ok(
+                v @ (fyaml::Value::Null
+                | fyaml::Value::Bool(_)
+                | fyaml::Value::Number(_)
+                | fyaml::Value::String(_)),
+            ) => v,
+            _ => fyaml::Value::String(value_str.to_string()),
+        };
         v.to_yaml_string()
             .map_err(|e| Error::Base(format!("Failed to serialize value: {}", e)))?
             .trim()

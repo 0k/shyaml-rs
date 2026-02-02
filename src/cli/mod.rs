@@ -227,6 +227,10 @@ fn run_doc_mode_chain(
                     run_single_readonly(&cli, doc, multi_doc_yaml)?;
                 }
             }
+            // Single iteration action: use zero-copy path (preserves formatting)
+            Some(action) if is_last && normalize_iter_action(action, _yaml_mode).is_some() => {
+                run_single_readonly(&cli, doc, multi_doc_yaml)?;
+            }
             _ => {
                 // This shouldn't happen in DocMode - analyze_chain should have caught it
                 return Err("Unexpected action in DocMode".to_string());
@@ -242,9 +246,12 @@ fn run_doc_mode_empty(command_groups: &[Vec<String>], multi_doc_yaml: bool) -> R
     // Create empty document
     let mut doc = Document::new().str_err()?;
 
-    // Check if we need to handle empty readonly first
+    // Check if we need to handle empty readonly/iteration first
     let first_cli = def::Args::try_parse_from(&command_groups[0]).str_err()?;
-    if command_groups.len() == 1 && plan::is_readonly(first_cli.action.as_ref().unwrap()) {
+    let first_action = first_cli.action.as_ref().unwrap();
+    if command_groups.len() == 1
+        && (plan::is_readonly(first_action) || plan::is_derived(first_action))
+    {
         run_single_readonly_empty(&first_cli)?;
         return Ok(());
     }
@@ -666,7 +673,7 @@ fn run_single(
             let policies = crate::yaml::parse_merge_policies(merge_policy.as_ref())?;
             let result = crate::yaml::apply(overlays, &policies, value)?;
             if is_last {
-                print!("{}", crate::yaml::serialize(&result)?);
+                println!("{}", crate::yaml::serialize(&result)?);
             }
             Ok(result)
         }
@@ -679,7 +686,7 @@ fn run_single(
             let new_value = crate::yaml::parse_value(val_str, *yaml)?;
             let result = crate::yaml::set_value(key, new_value, value)?;
             if is_last {
-                print!("{}", crate::yaml::serialize(&result)?);
+                println!("{}", crate::yaml::serialize(&result)?);
             }
             Ok(result)
         }
@@ -687,7 +694,7 @@ fn run_single(
         Some(def::Actions::Del { key }) => {
             let result = crate::yaml::del(key, value)?;
             if is_last {
-                print!("{}", crate::yaml::serialize(&result)?);
+                println!("{}", crate::yaml::serialize(&result)?);
             }
             Ok(result)
         }
