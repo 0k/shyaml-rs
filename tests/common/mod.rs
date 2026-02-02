@@ -10,11 +10,7 @@ use tempfile::TempDir;
 
 /// Get path to the shyaml binary.
 pub fn binary_path() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("target");
-    path.push("debug");
-    path.push("shyaml");
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_shyaml"))
 }
 
 /// Run shyaml with given args and stdin, return (stdout, stderr, success).

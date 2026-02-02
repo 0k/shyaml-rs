@@ -4,16 +4,47 @@ set -e
 
 cd "$(dirname "$0")/.."
 
-echo "=== Running cargo build ==="
-cargo build
+coverage=false
+for arg in "$@"; do
+    case "$arg" in
+        --coverage) coverage=true ;;
+        *)
+            echo "Usage: $0 [--coverage]" >&2
+            echo "  --coverage  Run with coverage instrumentation and generate report" >&2
+            exit 1
+            ;;
+    esac
+done
 
-echo ""
-echo "=== Running cargo test ==="
-cargo test
+docshtest=(
+    python3 /home/vaab/dev/python/docshtest/docshtest.py README.org
+)
 
-echo ""
-echo "=== Running docshtest on README.org ==="
-python3 /home/vaab/dev/python/docshtest/docshtest.py README.org -r "#\\bshyaml\\b#$PWD/target/debug/shyaml#"
+if "$coverage"; then
+    echo "=== Running cargo tests (instrumented) ==="
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov --no-report test
+
+    echo ""
+    echo "=== Running docshtest on README.org (instrumented) ==="
+    LLVM_PROFILE_FILE="$PWD/target/llvm-cov-target/shyaml-rs-docshtest-%p-%m.profraw" \
+        "${docshtest[@]}" -r "#\\bshyaml\\b#$PWD/target/llvm-cov-target/debug/shyaml#"
+
+    echo ""
+    echo "=== Coverage Report ==="
+    cargo llvm-cov report --summary-only
+else
+    echo "=== Running cargo build ==="
+    cargo build
+
+    echo ""
+    echo "=== Running cargo test ==="
+    cargo test
+
+    echo ""
+    echo "=== Running docshtest on README.org ==="
+    "${docshtest[@]}" -r "#\\bshyaml\\b#$PWD/target/debug/shyaml#"
+fi
 
 echo ""
 echo "=== All tests passed ==="
