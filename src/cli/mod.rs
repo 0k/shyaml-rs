@@ -338,7 +338,15 @@ pub fn run() -> Result<bool, String> {
     }
 
     let cli = setup_cli_context(&command_groups[0])?;
+    let quiet = cli.quiet;
 
+    match run_commands(&cli, &command_groups) {
+        Err(_) if quiet => Ok(false),
+        other => other,
+    }
+}
+
+fn run_commands(cli: &def::Args, command_groups: &[Vec<String>]) -> Result<bool, String> {
     if cli.version {
         println!("version: {}", env!("CARGO_PKG_VERSION"));
         println!(
@@ -349,12 +357,12 @@ pub fn run() -> Result<bool, String> {
         return Ok(true);
     }
 
-    let line_buffered = is_line_buffered(&cli);
-    let yaml_output = is_yaml_output(&cli);
+    let line_buffered = is_line_buffered(cli);
+    let yaml_output = is_yaml_output(cli);
     let separator = if yaml_output { "---\n" } else { "\0" };
 
     // Determine execution mode for the command chain
-    let exec_mode = determine_execution_mode(&command_groups)?;
+    let exec_mode = determine_execution_mode(command_groups)?;
 
     use std::io::Write;
 
@@ -371,13 +379,13 @@ pub fn run() -> Result<bool, String> {
             ExecutionMode::DocMode => {
                 // DocMode: work directly with Document via Editor (practical COW)
                 let mut doc = doc_result.str_err()?;
-                run_doc_mode_chain(&command_groups, &mut doc, yaml_output)?;
+                run_doc_mode_chain(command_groups, &mut doc, yaml_output)?;
             }
             ExecutionMode::ValueMode => {
                 // ValueMode: convert to owned Value (for complex operations like apply, keys, values)
                 let doc = doc_result.str_err()?;
                 let value = crate::yaml::document_to_value(&doc).str_err()?;
-                run_value_mode_chain(&command_groups, value, yaml_output)?;
+                run_value_mode_chain(command_groups, value, yaml_output)?;
             }
         }
 
@@ -390,10 +398,10 @@ pub fn run() -> Result<bool, String> {
         // Empty input - no multi-doc separation needed
         match exec_mode {
             ExecutionMode::DocMode => {
-                run_doc_mode_empty(&command_groups, false)?;
+                run_doc_mode_empty(command_groups, false)?;
             }
             ExecutionMode::ValueMode => {
-                run_value_mode_chain(&command_groups, crate::yaml::Value::Null, false)?;
+                run_value_mode_chain(command_groups, crate::yaml::Value::Null, false)?;
             }
         }
     }
@@ -445,9 +453,6 @@ fn run_single_readonly(
                             println!();
                         }
                         return Ok(());
-                    }
-                    if cli.quiet {
-                        std::process::exit(1);
                     }
                     Err(e)
                 }
@@ -512,9 +517,6 @@ fn run_single_readonly_empty(cli: &def::Args) -> Result<(), String> {
             if let Some(default_val) = default {
                 print!("{}", default_val);
                 return Ok(());
-            }
-            if cli.quiet {
-                std::process::exit(1);
             }
             Err("empty document".to_string())
         }
@@ -638,9 +640,6 @@ fn run_single(
                             }
                         }
                         return Ok(crate::yaml::Value::String(default_val.clone()));
-                    }
-                    if cli.quiet {
-                        std::process::exit(1);
                     }
                     Err(e)
                 }

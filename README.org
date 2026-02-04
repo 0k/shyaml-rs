@@ -750,6 +750,17 @@ $ echo "a: 3" | shyaml -q get-value a; echo "errlvl: $?"
 3errlvl: 0
 #+end_src
 
+This works with all actions, not just ~get-value~:
+
+#+begin_src docshtest
+$ echo "a:" | shyaml -q get-values-0 "services"; echo "errlvl: $?"
+errlvl: 1
+$ echo "a:" | shyaml -q keys "services"; echo "errlvl: $?"
+errlvl: 1
+$ echo "a:" | shyaml -q values "services"; echo "errlvl: $?"
+errlvl: 1
+#+end_src
+
 
 *** Ordered mappings
 
