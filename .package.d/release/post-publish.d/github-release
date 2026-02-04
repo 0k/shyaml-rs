@@ -38,7 +38,7 @@ fi
 echo "=== Creating GitHub release ===" >&2
 
 gh release create "$VERSION" \
-    --title "Release $VERSION" \
+    --title "$VERSION" \
     --notes "$CHANGELOG" \
     "$ARTIFACT"
 
