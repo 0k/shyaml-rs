@@ -13,15 +13,16 @@ set -e
 
 ## ANSI colors (disabled if not a TTY, overridable via COLOR/NO_COLOR)
 if [ -n "${NO_COLOR:-}" ]; then
-    RED="" GREEN="" RESET=""
+    RED="" YELLOW="" GREEN="" WHITE="" RESET=""
 elif [ -n "${COLOR:-}" ] || [ -t 1 ]; then
-    RED=$'\e[31m' GREEN=$'\e[32m' RESET=$'\e[0m'
+    RED=$'\e[1;31m' YELLOW=$'\e[1;33m' GREEN=$'\e[1;32m' WHITE=$'\e[1;37m' RESET=$'\e[0m'
 else
-    RED="" GREEN="" RESET=""
+    RED="" YELLOW="" GREEN="" WHITE="" RESET=""
 fi
 
 
 exname="${0##*/}"
+FORCE=""
 
 # Cache directory for build artifacts and docker metadata
 CACHE_DIR="${CACHE_DIR:-$PWD/.cache}"
@@ -43,16 +44,16 @@ BASE_IMAGE_SUFFIX="slim-bookworm"
 
 
 ## Get digest for a tag, with caching (expires after DIGEST_CACHE_MAX_AGE_SECONDS)
-## Usage: get_digest TAG [force]
-##   force: skip cache and fetch from remote
+## Usage: get_digest TAG [refresh]
+##   refresh: skip cache and fetch from remote
 get_digest() {
     local tag="$1"
-    local force="${2:-}"
+    local refresh="${2:-}"
     local cache_file="${DIGEST_CACHE_DIR}/${tag//\//_}"
     local digest
 
-    # Check cache unless force refresh
-    if [ -z "$force" ] && [ -f "$cache_file" ]; then
+    # Check cache unless refresh requested
+    if [ -z "$refresh" ] && [ -f "$cache_file" ]; then
         local cache_mtime now cache_age
         cache_mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || echo 0)
         now=$(date +%s)
@@ -111,25 +112,36 @@ get_latest_version() {
 }
 
 ## Verify current pinned version digest matches expected
-## Usage: check_current_digest [force]
+## Usage: check_current_digest [refresh]
+##   refresh: skip digest cache and fetch from remote
 check_current_digest() {
-    local force="${1:-}"
+    local refresh="${1:-}"
     local full_tag="${BASE_IMAGE_VERSION}-${BASE_IMAGE_SUFFIX}"
     local current_digest
-    current_digest=$(get_digest "$full_tag" "$force") || return 1
+    current_digest=$(get_digest "$full_tag" "$refresh") || return 1
 
     if [ "$current_digest" != "$BASE_IMAGE_DIGEST" ]; then
-        echo "${RED}ERROR${RESET}: Digest mismatch for pinned version!" >&2
-        echo "  The remote digest for rust:${full_tag} has changed." >&2
+        local label="error"
+        if [ -n "$FORCE" ]; then
+            label="${YELLOW}warn${RESET}"
+        else
+            label="${RED}error${RESET}"
+        fi
+        echo "${label}: Digest mismatch for pinned version!" >&2
+        echo "  The remote digest for ${WHITE}rust:${full_tag}${RESET} has changed." >&2
         echo "  This should not happen for a pinned version tag." >&2
-        echo "  Expected: ${BASE_IMAGE_DIGEST}" >&2
-        echo "  Got:      ${current_digest}" >&2
+        echo "    Expected: ${BASE_IMAGE_DIGEST}" >&2
+        echo "    Got:      ${current_digest}" >&2
+        if [ -z "$FORCE" ]; then
+            echo >&2
+            echo "  Use '$exname -f' to force build with the pinned digest." >&2
+        fi
         return 1
     fi
 }
 
 do_check() {
-    check_current_digest force || return 1
+    check_current_digest refresh || return 1
 
     # Check for newer version
     local latest_version
@@ -141,7 +153,7 @@ do_check() {
     fi
 
     local latest_digest
-    latest_digest=$(get_digest "${latest_version}-${BASE_IMAGE_SUFFIX}" force) || return 1
+    latest_digest=$(get_digest "${latest_version}-${BASE_IMAGE_SUFFIX}" refresh) || return 1
     echo "UPDATE AVAILABLE:"
     echo "  Current: rust:${full_tag}"
     echo "  Latest:  rust:${latest_version}-${BASE_IMAGE_SUFFIX}"
@@ -164,7 +176,7 @@ do_update() {
     fi
 
     if [ "$new_version" = "$BASE_IMAGE_VERSION" ]; then
-        check_current_digest force || return 1
+        check_current_digest refresh || return 1
         echo "Already at${msg} version ${new_version}, digest verified." >&2
         return 0
     fi
@@ -173,7 +185,7 @@ do_update() {
 
     # Fetch new digest (force refresh)
     local new_digest
-    new_digest=$(get_digest "$full_tag" force) || return 1
+    new_digest=$(get_digest "$full_tag" refresh) || return 1
     echo "Update script: ${BASE_IMAGE_VERSION} -> ${new_version}" >&2
 
     # Update the script itself
@@ -195,7 +207,13 @@ do_build() {
     fi
 
     ## Get and verify digest (with weekly cache expiry)
-    check_current_digest || return 1
+    if ! check_current_digest; then
+        if [ -n "$FORCE" ]; then
+            echo "${YELLOW}warn${RESET}: Forcing build with pinned digest despite mismatch (\`-f\` provided)." >&2
+        else
+            return 1
+        fi
+    fi
 
     local base_image_by_digest="rust@${BASE_IMAGE_DIGEST}"
     local digest_short="${BASE_IMAGE_DIGEST#sha256:}"
@@ -240,6 +258,18 @@ DOCKERFILE
 
     echo "${GREEN}Successfully${RESET} built target/x86_64-unknown-linux-musl/release/shyaml"
 }
+
+# Parse options
+while [ "${1:0:1}" = "-" ] 2>/dev/null; do
+    case "$1" in
+        -f|--force) FORCE=true; shift ;;
+        *)
+            echo "Unknown option: $1" >&2
+            echo "Usage: $exname [-f] [check|update [VERSION]|build]" >&2
+            exit 1
+            ;;
+    esac
+done
 
 # Handle commands
 case "${1:-}" in

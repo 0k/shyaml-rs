@@ -12,7 +12,7 @@ VERSION=$(git describe --tags --exact-match 2>/dev/null) || {
 
 echo "=== Building static musl binary ===" >&2
 
-./musl-static-build
+./musl-static-build -f
 
 BINARY="target/x86_64-unknown-linux-musl/release/shyaml"
 if [ ! -f "$BINARY" ]; then
