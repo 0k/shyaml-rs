@@ -37,11 +37,29 @@ fi
 
 echo "=== Creating GitHub release ===" >&2
 
+## Resolve the GitHub "owner/repo" explicitly rather than relying on `gh`
+## auto-detecting it from the current `origin`. `pkg` runs this hook inside a
+## temporary clone created with `git clone . <tmp>`, so the clone's `origin`
+## is a LOCAL filesystem path, not the github URL — `gh` then fails with
+## "none of the git remotes point to a known GitHub host". Chase one hop from a
+## local-path origin to reach the real github remote, then pass it via `--repo`.
+origin=$(git remote get-url origin 2>/dev/null) || origin=
+if [ -d "$origin" ]; then
+    origin=$(git -C "$origin" remote get-url origin 2>/dev/null) || origin=
+fi
+repo=$(printf '%s\n' "$origin" |
+    sed -nE 's#^(git@github\.com:|(ssh://)?git@github\.com/|https://github\.com/)([^/]+/[^/.]+)(\.git)?/?$#\3#p')
+if [ -z "$repo" ]; then
+    echo "Error: could not resolve a github.com owner/repo from origin '$origin'" >&2
+    exit 1
+fi
+
 gh release create "$VERSION" \
+    --repo "$repo" \
     --title "$VERSION" \
     --notes "$CHANGELOG" \
     "$ARTIFACT"
 
 rm -f "$ARTIFACT"
 
-echo "GitHub release created: $(gh release view "$VERSION" --json url -q .url)" >&2
+echo "GitHub release created: $(gh release view "$VERSION" --repo "$repo" --json url -q .url)" >&2
