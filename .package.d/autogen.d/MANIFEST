@@ -1,0 +1,4 @@
+source 0k-pkg 4697053
+autogen.sh f9091f3320c891304f2281a6a8ff3de9e09850f31c376fba592f7c4579e9a686 share
+.package.d/autogen.d/20-org-to-md.sh f44bb4dd8298a2824d2d1d8c7148f69a6451ae8673c4bae7c6a76947023bb5d4 cargo
+.package.d/autogen.d/90-prepare.sh 3926c58c893ed6fb1980fe0763ba1bd79cbbf2eddadf0d3b13e309d2aeb67116 autogen

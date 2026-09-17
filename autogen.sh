@@ -1,9 +1,15 @@
 #!/bin/sh
 
 ##
-## You can download latest version of this file:
-##  $ wget https://gist.github.com/vaab/9118087/raw -O autogen.sh
-##  $ chmod +x autogen.sh
+## Vendored from 0k-pkg (``src/share/autogen.sh``).  Do not edit in
+## place: refresh it with ``pkg vendor`` from a machine where 0k-pkg
+## is installed.  See ``.package.d/autogen.d/MANIFEST`` for provenance.
+##
+## This script is self-sufficient on purpose: a fresh clone only needs
+## ``git``, ``sed``, ``date`` and ``grep`` to run ``./autogen.sh`` and
+## then build the project.  Optional tools (pandoc, gitchangelog, ...)
+## degrade gracefully unless ``AUTOGEN_STRICT=1`` is set, which the
+## release pipeline does.
 ##
 
 ##
@@ -73,6 +79,24 @@ depends() {
     done
 }
 
+## Like ``depends`` but for optional tools: returns 1 (after printing
+## a warning) when a tool is missing, so the calling script can skip
+## the step.  With ``AUTOGEN_STRICT=1`` (set by the release pipeline)
+## a missing tool is fatal, exactly like ``depends``.
+depends_soft() {
+    local __i __path
+    for __i in "$@"; do
+        if ! __path=$(get_path "$__i"); then
+            if [ "$AUTOGEN_STRICT" ]; then
+                die "dependency check: couldn't find '$__i' (required in strict mode)."
+            fi
+            echo "$exname: ${WARNING}warning:${NORMAL} optional tool '$__i' not found; skipping." >&2
+            return 1
+        fi
+    done
+    return 0
+}
+
 die() {
     [ "$*" ] || print_syntax_warning "$FUNCNAME: no arguments."
     [ "$exname" ] || print_exit "$FUNCNAME: 'exname' var is null or not defined." >&2
@@ -100,6 +124,8 @@ get_current_version() {
         echo "$version"
     else
         version=$(echo "$version" | compat_sed "$get_short_tag")
+        ## ``-dev.N`` is valid SemVer (cargo) and normalises to
+        ## ``.devN`` under PEP 440 (python).
         echo "${version}-dev.$(dev_version_tag)"
     fi
 
@@ -287,10 +313,19 @@ while [ "$1" ]; do
 done
 
 
+## Each script is sourced in a subshell so that a ``return 1`` or a
+## ``die`` inside it aborts that script only.  Its output is captured
+## to a file because in a plain pipeline the exit status would be the
+## one of ``sed``, not of the script.
+autogen_log=$(mktemp) || die "Could not create a temporary file."
+trap 'rm -f "$autogen_log"' EXIT
 for script in .package.d/autogen.d/*.sh; do
     [ -e "$script" ] || continue
     echo "Running \`\`$script\`\`..."
-    if . "$script" 2>&1 | compat_sed 's/^/  | /g'; then
+    ( . "$script" ) > "$autogen_log" 2>&1
+    autogen_status=$?
+    compat_sed 's/^/  | /g' "$autogen_log"
+    if [ "$autogen_status" = 0 ]; then
         echo "  ..done ($script)"
     else
         echo "  ..failed ! ($script)"

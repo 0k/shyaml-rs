@@ -1,19 +1,24 @@
 # -*- mode: shell-script -*-
+##
+## Vendored from 0k-pkg (``cargo/autogen.d/20-org-to-md.sh``).
+## Refresh with ``pkg vendor``; to keep local edits, add a line
+## ``## pkgcmd: local-override`` in the first five lines.
+##
+## Generates ``README.md`` from ``README.org`` for crates.io, and
+## appends the changelog to it: cargo has no dedicated changelog
+## field, the README is the only file crates.io renders.
+##
+## Tables are emitted as GFM pipe tables (``+pipe_tables``): plain
+## ``commonmark`` falls back to raw HTML tables, which crates.io strips.
+##
+## Needs ``pandoc`` and ``gitchangelog``.  Without them this step is
+## skipped with a warning (a fresh clone can still build); the release
+## pipeline sets ``AUTOGEN_STRICT=1`` which makes them mandatory.
+##
 
-##
-## PACKAGE TIME SCRIPT - Generates README.md for crates.io
-##
-## This runs during `autogen.sh` before `cargo publish`. The generated
-## README.md is what crates.io displays on the crate page.
-##
-## Note: build.rs also generates README.md (to OUT_DIR) for rustdoc,
-## but that runs on the consumer's machine, not at publish time.
-##
-
-depends pandoc
-
-## Lua filter: convert org-mode `:no_run yes` to markdown `rust,no_run`
-## (rustdoc expects `rust,no_run` not pandoc's `{.rust .no_run}` format)
+## Lua filter: convert org-mode ``:no_run yes`` (and friends) on a
+## rust block to the ```` ```rust,no_run ```` fence rustdoc expects
+## instead of pandoc's ``{.rust .no_run}`` attribute syntax.
 RUSTDOC_ATTRS_LUA='
 function CodeBlock(el)
   if el.classes[1] == "rust" then
@@ -40,16 +45,29 @@ end
 '
 
 if [ -f README.org ]; then
+    depends_soft pandoc || {
+        echo "README.md not regenerated (fine for building, required for release)." >&2
+        return 0
+    }
     lua_filter=$(mktemp)
     printf '%s\n' "$RUSTDOC_ATTRS_LUA" > "$lua_filter"
-    pandoc README.org -f org -t commonmark --lua-filter="$lua_filter" -o README.md.tmp || return 1
+    pandoc README.org -f org -t commonmark+pipe_tables --lua-filter="$lua_filter" -o README.md.tmp || {
+        rm -f "$lua_filter" README.md.tmp
+        return 1
+    }
     rm -f "$lua_filter"
 
-    # Append changelog: try gitchangelog (dynamic), fall back to CHANGELOG.md (static)
-    if command -v gitchangelog >/dev/null 2>&1; then
-        echo "" >> README.md.tmp
-        echo "" >> README.md.tmp
-        gitchangelog >> README.md.tmp
+    if depends_soft gitchangelog; then
+        if [ ! -e .gitchangelog.rc ]; then
+            echo "No .gitchangelog.rc found: changelog not appended to README.md." >&2
+        else
+            echo "" >> README.md.tmp
+            echo "" >> README.md.tmp
+            gitchangelog >> README.md.tmp || {
+                rm -f README.md.tmp
+                return 1
+            }
+        fi
     elif [ -f CHANGELOG.md ]; then
         echo "" >> README.md.tmp
         echo "" >> README.md.tmp
